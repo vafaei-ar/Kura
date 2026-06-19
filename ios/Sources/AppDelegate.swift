@@ -15,26 +15,35 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // Local-notification permission works on a free team (no push entitlement).
+        requestNotificationAuth(registerRemote: Config.pushEnabled)
 
         if Config.pushEnabled {
-            requestPushAuthorization()
-            // Cold launch from a notification tap.
+            // Cold launch from a real push tap.
             if let userInfo = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {
                 handleCheckinPush(userInfo)
             }
         } else {
-            // Free personal team / no push entitlement: skip the APNs path
-            // entirely (it can abort on non-entitled builds) and register a
-            // placeholder token so the rest of the flow is still testable.
+            // Free personal team: skip APNs (it can abort on non-entitled builds).
+            // Register a placeholder token and use the live notify WebSocket
+            // instead of real push.
             let placeholder = "SIMULATED-" + (UIDevice.current.identifierForVendor?.uuidString ?? "dev")
             Task { await DeviceRegistrationService.shared.register(pushToken: placeholder) }
+            NotifyClient.shared.start()
         }
         return true
     }
 
-    private func requestPushAuthorization() {
+    /// Reconnect the live notify socket whenever the app comes to the foreground.
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        if !Config.pushEnabled {
+            NotifyClient.shared.start()
+        }
+    }
+
+    private func requestNotificationAuth(registerRemote: Bool) {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-            guard granted else { return }
+            guard granted, registerRemote else { return }
             DispatchQueue.main.async {
                 UIApplication.shared.registerForRemoteNotifications()
             }

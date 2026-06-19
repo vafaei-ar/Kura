@@ -61,12 +61,41 @@ def test_device_token_not_leaked():
     assert "push_token" not in r.json()
 
 
-def test_mock_audio_ws_sends_ready():
+def test_notify_ws_receives_invite():
+    client = fresh_client()
+    client.post(
+        "/v1/devices/register",
+        json={"user_id": "p9", "push_token": "tok000000000000"},
+    )
+    with client.websocket_connect("/v1/notify/p9") as ws:
+        ack = ws.receive_json()
+        assert ack["type"] == "connected"
+        r = client.post("/v1/checkins/start", json={"user_id": "p9"})
+        assert r.status_code == 200
+        assert r.json()["live_delivered"] == 1
+        invite = ws.receive_json()
+        assert invite["type"] == "checkin_invite"
+        assert invite["session_id"] == r.json()["session_id"]
+
+
+def test_mock_audio_ws_conversation():
     client = fresh_client()
     with client.websocket_connect("/ws/audio/sess-123") as ws:
-        msg = ws.receive_json()
-        assert msg["type"] == "ready"
-        assert msg["session_id"] == "sess-123"
+        greeting = ws.receive_json()
+        assert greeting["type"] == "greeting"
+        # First user turn -> first question
+        ws.send_json({"type": "text_input", "text": "I'm okay"})
+        q1 = ws.receive_json()
+        assert q1["type"] == "response"
+        assert q1["progress"] > 0
+        # Exhaust the script -> completion
+        for _ in range(5):
+            ws.send_json({"type": "text_input", "text": "yes"})
+            msg = ws.receive_json()
+            if msg["type"] == "completion":
+                break
+        assert msg["type"] == "completion"
+        assert msg["progress"] == 100
 
 
 def test_register_is_idempotent_upsert():

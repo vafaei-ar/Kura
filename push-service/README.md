@@ -22,6 +22,17 @@ pytest                        # all tests run in dry-run mode, offline
 | POST | `/v1/devices/register` | iOS app | store `user_id → push_token` |
 | GET  | `/v1/devices/{user_id}` | debug | inspect a device (token masked) |
 | POST | `/v1/checkins/start` | provider console | create VERA session + push to phone |
+| WS   | `/v1/notify/{user_id}` | iOS app | live invite channel (free-team push workaround) |
+| WS   | `/ws/audio/{session_id}` | iOS app | DEV MOCK of VERA's audio socket |
+
+### Free-team push workaround
+
+Real APNs push (waking a closed app) needs the paid Apple Developer Program.
+Until then, the app holds `/v1/notify/{user_id}` open while running; a triggered
+check-in is delivered down that socket instantly (`live_delivered` in the
+response counts live sockets reached) and the app raises a *local* notification.
+This can't wake a force-quit app, but covers development and a supervised trial.
+Flip the app's `Config.pushEnabled = true` to switch to APNs later.
 
 ### Try it (dry-run)
 

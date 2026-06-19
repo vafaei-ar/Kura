@@ -15,7 +15,10 @@ Flow for /v1/checkins/start:
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from typing import Dict, Set
 
 from fastapi import (
     Depends,
@@ -47,6 +50,48 @@ _store = DeviceStore(get_settings().device_store_path)
 
 def get_store() -> DeviceStore:
     return _store
+
+
+class NotifyManager:
+    """Tracks live app WebSocket connections per user_id.
+
+    This is the FREE-TEAM push workaround: while the app is running it holds a
+    socket here, and a triggered check-in is delivered down it instantly. It
+    does NOT wake a closed app — that needs real APNs (paid program). The app
+    swaps this transport for APNs by flipping Config.pushEnabled later.
+    """
+
+    def __init__(self) -> None:
+        self._conns: Dict[str, Set[WebSocket]] = {}
+        self._lock = asyncio.Lock()
+
+    async def connect(self, user_id: str, ws: WebSocket) -> None:
+        async with self._lock:
+            self._conns.setdefault(user_id, set()).add(ws)
+
+    async def disconnect(self, user_id: str, ws: WebSocket) -> None:
+        async with self._lock:
+            conns = self._conns.get(user_id)
+            if conns:
+                conns.discard(ws)
+                if not conns:
+                    self._conns.pop(user_id, None)
+
+    async def deliver(self, user_id: str, payload: dict) -> int:
+        """Send payload to all live sockets for user_id. Returns # delivered."""
+        async with self._lock:
+            targets = list(self._conns.get(user_id, set()))
+        delivered = 0
+        for ws in targets:
+            try:
+                await ws.send_json(payload)
+                delivered += 1
+            except Exception:
+                await self.disconnect(user_id, ws)
+        return delivered
+
+
+notify_manager = NotifyManager()
 
 
 def require_provider(
@@ -128,35 +173,93 @@ async def start_checkin(
         scenario=req.scenario,
     )
 
+    # Free-team workaround: also deliver over any live app WebSocket.
+    live_delivered = await notify_manager.deliver(
+        req.user_id,
+        {"type": "checkin_invite", "session_id": session_id, "scenario": req.scenario},
+    )
+
     return StartCheckinResponse(
         session_id=session_id,
         user_id=req.user_id,
         push_sent=result.sent,
         push_dry_run=result.dry_run,
-        detail=result.detail,
+        live_delivered=live_delivered,
+        detail=f"{result.detail}; live_delivered={live_delivered}",
     )
 
 
-@app.websocket("/ws/audio/{session_id}")
-async def mock_audio_ws(websocket: WebSocket, session_id: str) -> None:
-    """DEV MOCK of VERA-cloud's audio socket.
-
-    Lets the iOS check-in screen reach a 'live' state without VERA running:
-    accepts the connection, sends a 'ready' frame, and drains incoming mic
-    frames. In production the app points Config.veraBaseURL at the real
-    VERA-cloud and this endpoint is unused.
+@app.websocket("/v1/notify/{user_id}")
+async def notify_ws(websocket: WebSocket, user_id: str) -> None:
+    """The app holds this open to receive check-in invites in real time
+    (free-team alternative to APNs). Sends a 'connected' ack, then streams
+    invite payloads delivered via NotifyManager.
     """
     await websocket.accept()
-    await websocket.send_json({"type": "ready", "session_id": session_id})
-    frames = 0
+    await notify_manager.connect(user_id, websocket)
+    await websocket.send_json({"type": "connected", "user_id": user_id})
     try:
         while True:
             msg = await websocket.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
-            if msg.get("bytes") is not None:
-                frames += 1
-                if frames % 50 == 0:
-                    logging.info("mock /ws/audio %s: %d audio frames", session_id, frames)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await notify_manager.disconnect(user_id, websocket)
+
+
+# Scripted mock conversation (text-only; the app speaks it with on-device TTS).
+_MOCK_GREETING = "Hello, this is your VERA check-in. How are you feeling today?"
+_MOCK_QUESTIONS = [
+    "Thanks for sharing. Have you taken your medications today?",
+    "Good. Any new weakness, numbness, or trouble speaking?",
+    "Understood. Is there anything else you'd like the care team to know?",
+]
+_MOCK_CLOSING = "Thank you. Your care team will review your check-in. Take care."
+
+
+@app.websocket("/ws/audio/{session_id}")
+async def mock_audio_ws(websocket: WebSocket, session_id: str) -> None:
+    """DEV MOCK of VERA-cloud's audio socket — implements VERA's JSON protocol.
+
+    Drives a scripted check-in so the iOS voice loop (on-device TTS + speech
+    recognition) is testable WITHOUT Azure/VERA: greet, then for each
+    `text_input` reply with the next question, then a `completion`. In
+    production the app points Config.veraBaseURL at real VERA-cloud and this
+    endpoint is unused.
+    """
+    await websocket.accept()
+    total = len(_MOCK_QUESTIONS) + 1
+    await websocket.send_json({"type": "greeting", "text": _MOCK_GREETING, "progress": 0})
+    idx = 0
+    try:
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            text = msg.get("text")
+            if not text:
+                continue  # ignore binary archival audio in the mock
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if data.get("type") != "text_input":
+                continue
+            logging.info("mock /ws/audio %s heard: %r", session_id, data.get("text"))
+            if idx < len(_MOCK_QUESTIONS):
+                await websocket.send_json({
+                    "type": "response",
+                    "text": _MOCK_QUESTIONS[idx],
+                    "progress": int((idx + 1) / total * 100),
+                })
+                idx += 1
+            else:
+                await websocket.send_json({
+                    "type": "completion",
+                    "text": _MOCK_CLOSING,
+                    "progress": 100,
+                })
     except WebSocketDisconnect:
         pass

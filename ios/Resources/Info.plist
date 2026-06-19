@@ -30,6 +30,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Kura uses the microphone so you can talk with your VERA care check-in.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Kura transcribes your spoken answers on-device so your care check-in can respond.</string>
 	<!-- Required so the app can reach the push-service on your local network
 	     (a private LAN IP). iOS shows a one-time "allow local network" prompt. -->
 	<key>NSLocalNetworkUsageDescription</key>

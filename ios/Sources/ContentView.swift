@@ -81,7 +81,6 @@ struct ContentView: View {
             }
         }
     }
-}
 
     // MARK: - Dev tools (DEBUG builds only)
 

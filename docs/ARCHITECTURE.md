@@ -70,9 +70,24 @@ Keeps the clinically-reviewed engine stable; Kura calls it over the network.
 
 ### ios (SwiftUI) — `ios/`
 - Registers for push, sends token to push-service.
-- Parses `session_id` from the check-in push, opens `/ws/audio/{session_id}`.
-- `AudioSocketClient` is a **skeleton**: the exact audio framing must be matched
-  to VERA-cloud's `websocket/handlers/audio_handler.py`.
+- Parses `session_id` from the check-in invite, opens `/ws/audio/{session_id}`.
+- `AudioSocketClient` implements **VERA's actual `/ws/audio` protocol**
+  (from `api/main.py` + `frontend/static/app.js`):
+  - **server → app** JSON: `greeting`/`audio`/`response`/`question`/`completion`
+    with `text`, optional `audio_data` (base64 MP3), and `progress`.
+  - **app → server** JSON: `{"type":"text_input","text": ...}`.
+  - Recognition is **on-device** (`SFSpeechRecognizer`); bot speech plays the
+    base64 MP3, or falls back to on-device TTS when `audio_data` is absent
+    (so the loop works against the mock with no Azure).
+  - Turn-taking: never listens while the bot speaks; a short silence ends the
+    user's turn.
+
+### Testing the audio loop without Azure
+The push-service `/ws/audio/{session_id}` mock speaks VERA's protocol and runs a
+scripted check-in (greeting → questions → completion). With the app pointed at
+the push-service, you get a full spoken turn-loop (on-device TTS + recognition)
+with no Azure/VERA. Point `Config.veraBaseURL` at real VERA-cloud to use Azure
+voices and the real dialog/flagging engine.
 
 ## What's NOT built yet (next steps)
 

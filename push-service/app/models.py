@@ -46,4 +46,5 @@ class StartCheckinResponse(BaseModel):
     user_id: str
     push_sent: bool
     push_dry_run: bool
+    live_delivered: int = 0
     detail: str = ""
