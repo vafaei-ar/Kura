@@ -13,6 +13,10 @@ VERA-cloud repo.
 > Companion to [`vafaei-ar/VERA-cloud`](https://github.com/vafaei-ar/VERA-cloud).
 > See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
+![Provider-triggered iOS check-in flow](docs/architecture-flow.svg)
+
+*Teal = reused from VERA-cloud · coral = new for the iOS beta.*
+
 ## What's here
 
 ```

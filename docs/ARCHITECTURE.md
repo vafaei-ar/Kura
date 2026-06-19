@@ -9,6 +9,10 @@ Kura contains **no clinical logic**. All assessment, BE-FAST flagging, and
 escalation stay in the clinically-reviewed VERA-cloud repo (which is "DRAFT,
 pending clinician sign-off"). Kura only **triggers** and **transports**.
 
+![Provider-triggered iOS check-in flow](architecture-flow.svg)
+
+*Teal = reused from VERA-cloud, coral = new for the iOS beta.*
+
 ## Flow
 
 ```
