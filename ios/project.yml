@@ -1,0 +1,47 @@
+# XcodeGen project definition.
+# Generate the Xcode project on your Mac with:  brew install xcodegen && xcodegen
+# This keeps the .xcodeproj out of git (it's regenerated from this file).
+name: Kura
+options:
+  bundleIdPrefix: io.github.vafaei-ar  # change if you prefer a different reverse-DNS prefix
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""               # TODO: your 10-char Apple Team ID
+    SWIFT_VERSION: "5.9"
+
+targets:
+  Kura:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.vafaei-ar.kura   # must match APNS_BUNDLE_ID
+        TARGETED_DEVICE_FAMILY: "1"     # iPhone
+    # XcodeGen GENERATES this Info.plist (always includes CFBundleExecutable,
+    # CFBundleIdentifier, etc.) and merges in the custom keys below. This avoids
+    # the "missing CFBundleExecutable" install error from a hand-written plist.
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Kura
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSMicrophoneUsageDescription: "Kura uses the microphone so you can talk with your VERA care check-in."
+        UIBackgroundModes:
+          - remote-notification
+          - audio
+    # NOTE: the aps-environment entitlement must also be enabled in your
+    # Apple Developer App ID. See Resources/Kura.entitlements.
+    entitlements:
+      path: Resources/Kura.entitlements

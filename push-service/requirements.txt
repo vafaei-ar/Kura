@@ -1,0 +1,13 @@
+# Lower bounds chosen so pip installs prebuilt wheels on Python 3.11–3.13
+# (older pydantic-core had no 3.13 wheel and tried to compile Rust from source).
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.9
+pydantic-settings>=2.4
+httpx>=0.27
+PyJWT>=2.8
+cryptography>=43
+
+# dev / test
+pytest>=8
+pytest-asyncio>=0.23
