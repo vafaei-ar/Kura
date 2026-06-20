@@ -84,18 +84,24 @@ struct ContentView: View {
     private var greeting: String {
         let h = Calendar.current.component(.hour, from: Date())
         let part = h < 12 ? "Good morning" : (h < 18 ? "Good afternoon" : "Good evening")
-        let name = state.displayName.trimmingCharacters(in: .whitespaces)
+        let name = state.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         return name.isEmpty ? "\(part) 👋" : "\(part), \(name) 👋"
     }
 
     private var registrationCard: some View {
         VStack(spacing: 12) {
             HStack {
-                Text("Participant").foregroundStyle(.secondary)
+                Text("Name").foregroundStyle(.secondary)
                 Spacer()
-                Text(state.participantId).fontWeight(.semibold)
+                Text(state.displayName.isEmpty ? "—" : state.displayName).fontWeight(.semibold)
                 Button("Switch") { state.clearParticipant() }
                     .font(.caption.weight(.semibold)).buttonStyle(.borderless).tint(Theme.teal)
+            }
+            Divider()
+            HStack {
+                Text("Participant ID").foregroundStyle(.secondary)
+                Spacer()
+                Text(state.participantId).fontWeight(.semibold)
             }
             Divider()
             HStack {
