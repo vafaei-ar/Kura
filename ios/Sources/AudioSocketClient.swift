@@ -23,10 +23,20 @@ final class AudioSocketClient: NSObject, ObservableObject {
 
     enum State: Equatable { case idle, connecting, speaking, listening, ended, error(String) }
 
+    struct Turn: Identifiable, Equatable {
+        let id = UUID()
+        enum Speaker { case bot, user }
+        let speaker: Speaker
+        let text: String
+    }
+
     @Published private(set) var state: State = .idle
     @Published private(set) var lastBotText: String = ""
     @Published private(set) var partialUserText: String = ""
     @Published private(set) var progress: Double = 0
+    @Published private(set) var transcript: [Turn] = []
+    /// Set when VERA flags a red flag (BE-FAST). The UI must surface this prominently.
+    @Published private(set) var emergencyText: String?
 
     private var task: URLSessionWebSocketTask?
     private let urlSession = URLSession(configuration: .default)
@@ -137,7 +147,12 @@ final class AudioSocketClient: NSObject, ObservableObject {
         switch type {
         case "greeting", "audio", "response", "question", "completion":
             let botText = obj["text"] as? String ?? ""
-            if !botText.isEmpty { DispatchQueue.main.async { self.lastBotText = botText } }
+            if !botText.isEmpty {
+                DispatchQueue.main.async {
+                    self.lastBotText = botText
+                    self.transcript.append(Turn(speaker: .bot, text: botText))
+                }
+            }
             let isCompletion = (type == "completion")
             if isCompletion { conversationDone = true }
 
@@ -150,8 +165,11 @@ final class AudioSocketClient: NSObject, ObservableObject {
             }
 
         case "emergency_alert":
-            let m = obj["message"] as? String ?? "Please seek help."
-            DispatchQueue.main.async { self.lastBotText = "⚠️ " + m }
+            let m = obj["message"] as? String ?? "Please seek help now. If this is an emergency, call 911."
+            DispatchQueue.main.async {
+                self.emergencyText = m
+                self.transcript.append(Turn(speaker: .bot, text: "⚠️ " + m))
+            }
 
         case "error":
             setState(.error(obj["message"] as? String ?? "server error"))
@@ -162,6 +180,7 @@ final class AudioSocketClient: NSObject, ObservableObject {
     }
 
     private func sendTextInput(_ text: String) {
+        DispatchQueue.main.async { self.transcript.append(Turn(speaker: .user, text: text)) }
         let payload: [String: Any] = ["type": "text_input", "text": text]
         if let d = try? JSONSerialization.data(withJSONObject: payload),
            let s = String(data: d, encoding: .utf8) {

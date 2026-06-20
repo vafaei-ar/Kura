@@ -18,8 +18,10 @@ pytest                        # all tests run in dry-run mode, offline
 
 | Method | Path | Who | Purpose |
 |---|---|---|---|
+| GET  | `/` and `/console` | provider | web console (patient list + start check-in) |
 | GET  | `/health` | — | liveness + config summary |
 | POST | `/v1/devices/register` | iOS app | store `user_id → push_token` |
+| GET  | `/v1/devices` | provider console | list registered patients (tokens masked) |
 | GET  | `/v1/devices/{user_id}` | debug | inspect a device (token masked) |
 | POST | `/v1/checkins/start` | provider console | create VERA session + push to phone |
 | WS   | `/v1/notify/{user_id}` | iOS app | live invite channel (free-team push workaround) |

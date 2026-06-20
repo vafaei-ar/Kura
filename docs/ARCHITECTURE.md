@@ -91,10 +91,9 @@ voices and the real dialog/flagging engine.
 
 ## What's NOT built yet (next steps)
 
-1. **Provider web console** — currently any HTTP client (curl/Postman) can call
-   `/v1/checkins/start`. A minimal provider UI (patient list + "Start check-in")
-   is the next backend-side piece. Could live in `push-service` or extend
-   VERA-cloud's frontend.
+1. ~~Provider web console~~ **Done.** Served by the push-service at `/` and
+   `/console`: lists registered patients and starts a check-in (scenario + role).
+   See `app/console.py`.
 2. **Real VERA `/session/start` contract** — confirm the exact request/response
    fields and wire `VERA_API_BASE`. Today the client stubs a UUID if unset.
 3. **Audio protocol** — match `AudioSocketClient` to VERA's WS framing

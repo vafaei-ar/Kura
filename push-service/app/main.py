@@ -28,6 +28,9 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import HTMLResponse
+
+from .console import CONSOLE_HTML
 
 from .apns import APNsClient
 from .config import Settings, get_settings
@@ -106,6 +109,13 @@ def require_provider(
         raise HTTPException(status_code=401, detail="invalid or missing X-Provider-Key")
 
 
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/console", response_class=HTMLResponse, include_in_schema=False)
+def provider_console() -> str:
+    """Provider web console (static single-page UI)."""
+    return CONSOLE_HTML
+
+
 @app.get("/health")
 def health(settings: Settings = Depends(get_settings)) -> dict:
     return {
@@ -122,6 +132,25 @@ def register_device(
     store: DeviceStore = Depends(get_store),
 ) -> Device:
     return store.upsert(reg)
+
+
+@app.get("/v1/devices")
+def list_devices(
+    store: DeviceStore = Depends(get_store),
+    _: None = Depends(require_provider),
+) -> list[dict]:
+    """List registered devices (tokens masked). Used by the provider console."""
+    return [
+        {
+            "user_id": d.user_id,
+            "platform": d.platform,
+            "token_type": d.token_type,
+            "token_preview": d.push_token[:8] + "…",
+            "registered_at": d.registered_at,
+            "updated_at": d.updated_at,
+        }
+        for d in store.all().values()
+    ]
 
 
 @app.get("/v1/devices/{user_id}")
@@ -248,7 +277,17 @@ async def mock_audio_ws(websocket: WebSocket, session_id: str) -> None:
                 continue
             if data.get("type") != "text_input":
                 continue
+            spoken = (data.get("text") or "").lower()
             logging.info("mock /ws/audio %s heard: %r", session_id, data.get("text"))
+            # Demo of VERA's red-flag path: trigger words raise an emergency alert.
+            if any(w in spoken for w in (
+                "face", "arm", "speech", "slurred", "weak", "numb", "911", "can't move"
+            )):
+                await websocket.send_json({
+                    "type": "emergency_alert",
+                    "message": "What you described may be a sign of a stroke. "
+                               "If you are having these symptoms now, call 911 right away.",
+                })
             if idx < len(_MOCK_QUESTIONS):
                 await websocket.send_json({
                     "type": "response",

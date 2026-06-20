@@ -43,6 +43,24 @@ def test_register_then_start_checkin():
     assert body["session_id"]  # a stubbed UUID when VERA is not configured
 
 
+def test_console_served():
+    client = fresh_client()
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "Provider Console" in r.text
+
+
+def test_list_devices():
+    client = fresh_client()
+    client.post("/v1/devices/register", json={"user_id": "p1", "push_token": "abc12345xyz"})
+    client.post("/v1/devices/register", json={"user_id": "p2", "push_token": "def67890xyz"})
+    r = client.get("/v1/devices")
+    assert r.status_code == 200
+    users = {d["user_id"] for d in r.json()}
+    assert users == {"p1", "p2"}
+    assert all("push_token" not in d for d in r.json())
+
+
 def test_start_checkin_unknown_user_404():
     client = fresh_client()
     r = client.post("/v1/checkins/start", json={"user_id": "nope"})
