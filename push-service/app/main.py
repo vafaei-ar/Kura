@@ -96,6 +96,11 @@ class NotifyManager:
 
 notify_manager = NotifyManager()
 
+# Pending check-in invites per user_id, for the POLLING delivery path (works on
+# hosts without WebSockets, e.g. Azure free tier). start_checkin queues here; the
+# app polls /v1/checkins/pending/{user_id}, which returns and clears the invite.
+_pending: Dict[str, dict] = {}
+
 
 def require_provider(
     x_provider_key: str | None = Header(default=None),
@@ -203,11 +208,11 @@ async def start_checkin(
         scenario=req.scenario,
     )
 
-    # Free-team workaround: also deliver over any live app WebSocket.
-    live_delivered = await notify_manager.deliver(
-        req.user_id,
-        {"type": "checkin_invite", "session_id": session_id, "scenario": req.scenario},
-    )
+    invite = {"type": "checkin_invite", "session_id": session_id, "scenario": req.scenario}
+    # Queue for the polling path (free-tier friendly)...
+    _pending[req.user_id] = invite
+    # ...and also push to any live WebSocket (instant path, when available).
+    live_delivered = await notify_manager.deliver(req.user_id, invite)
 
     return StartCheckinResponse(
         session_id=session_id,
@@ -217,6 +222,14 @@ async def start_checkin(
         live_delivered=live_delivered,
         detail=f"{result.detail}; live_delivered={live_delivered}",
     )
+
+
+@app.get("/v1/checkins/pending/{user_id}")
+def poll_pending(user_id: str) -> dict:
+    """The app polls this every few seconds. Returns the queued check-in invite
+    (and clears it) or null. Works on hosts without WebSockets (Azure free tier).
+    """
+    return {"invite": _pending.pop(user_id, None)}
 
 
 @app.websocket("/v1/notify/{user_id}")

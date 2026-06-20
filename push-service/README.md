@@ -24,7 +24,8 @@ pytest                        # all tests run in dry-run mode, offline
 | GET  | `/v1/devices` | provider console | list registered patients (tokens masked) |
 | GET  | `/v1/devices/{user_id}` | debug | inspect a device (token masked) |
 | POST | `/v1/checkins/start` | provider console | create VERA session + push to phone |
-| WS   | `/v1/notify/{user_id}` | iOS app | live invite channel (free-team push workaround) |
+| GET  | `/v1/checkins/pending/{user_id}` | iOS app | poll for a queued check-in (free-tier delivery) |
+| WS   | `/v1/notify/{user_id}` | iOS app | live invite channel (instant; needs WebSockets) |
 | WS   | `/ws/audio/{session_id}` | iOS app | DEV MOCK of VERA's audio socket |
 
 ### Free-team push workaround

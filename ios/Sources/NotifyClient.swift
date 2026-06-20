@@ -2,77 +2,66 @@ import Foundation
 import UserNotifications
 import UIKit
 
-/// FREE-TEAM PUSH WORKAROUND.
+/// FREE-TIER CHECK-IN DELIVERY (polling).
 ///
-/// Holds a WebSocket to the push-service (`/v1/notify/<user_id>`) while the app
-/// is running. When the provider triggers a check-in, the server pushes the
-/// invite down this socket; we then raise a *local* notification (no push
-/// entitlement needed) and surface the invite in the UI.
+/// While the app is running it polls the push-service every few seconds
+/// (`GET /v1/checkins/pending/<user_id>`). When a check-in is queued (the
+/// provider hit "Start check-in"), the server returns it once; we raise a
+/// *local* notification (no push entitlement needed) and surface the invite.
 ///
-/// Limitation vs. real APNs: this only works while the app is running or
-/// recently backgrounded — it cannot wake a force-quit app. Once on the paid
-/// program, set `Config.pushEnabled = true` to use APNs instead; the invite
-/// handling below is identical.
+/// Why polling instead of a WebSocket: Azure's free App Service tier doesn't
+/// support WebSockets. Polling is plain HTTP, so it runs for $0. Trade-off: a
+/// few-seconds delay instead of instant. Once on the paid Apple program, set
+/// `Config.pushEnabled = true` to use real APNs instead.
 final class NotifyClient: NSObject, ObservableObject {
     static let shared = NotifyClient()
 
-    private var task: URLSessionWebSocketTask?
+    /// How often to check for a pending check-in while the app is open.
+    private let interval: TimeInterval = 3
 
-    /// Connect if not already connected (safe to call repeatedly, e.g. on foreground).
+    private var timer: Timer?
+    private var inFlight = false
+
+    /// Start polling if not already running (safe to call repeatedly).
     func start(userId: String = Config.userId) {
-        if let t = task, t.state == .running { return }
-        connect(userId: userId)
+        guard timer == nil, !userId.isEmpty else { return }
+        // Fire once immediately, then on a timer.
+        poll(userId: userId)
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.poll(userId: userId)
+        }
     }
 
     func stop() {
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
+        timer?.invalidate()
+        timer = nil
     }
 
-    private func connect(userId: String) {
-        task?.cancel(with: .goingAway, reason: nil)
+    private func poll(userId: String) {
+        guard !inFlight else { return }
+        inFlight = true
 
-        var comps = URLComponents(url: Config.pushServiceBaseURL, resolvingAgainstBaseURL: false)!
-        comps.scheme = (comps.scheme == "https") ? "wss" : "ws"
-        comps.path = "/v1/notify/\(userId)"
-        guard let url = comps.url else { return }
+        let url = Config.pushServiceBaseURL
+            .appendingPathComponent("/v1/checkins/pending/\(userId)")
+        var req = URLRequest(url: url)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
 
-        let t = URLSession.shared.webSocketTask(with: url)
-        task = t
-        t.resume()
-        receive()
-    }
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            defer { self?.inFlight = false }
+            guard
+                let data,
+                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let invite = obj["invite"] as? [String: Any],
+                let session = invite["session_id"] as? String
+            else { return }
 
-    private func receive() {
-        task?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .failure:
-                // Lost connection — retry shortly (e.g. server restarted, Wi-Fi blip).
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                    self?.connect(userId: Config.userId)
-                }
-            case .success(let message):
-                if case let .string(text) = message, let data = text.data(using: .utf8) {
-                    self.handle(data)
-                }
-                self.receive()  // keep listening
+            let scenario = invite["scenario"] as? String ?? "guided.yml"
+            let model = CheckinInvite(sessionId: session, scenario: scenario)
+            DispatchQueue.main.async {
+                AppState.shared.receive(invite: model)
+                Self.postLocalNotification(for: model)
             }
-        }
-    }
-
-    private func handle(_ data: Data) {
-        guard
-            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            obj["type"] as? String == "checkin_invite",
-            let session = obj["session_id"] as? String
-        else { return }
-
-        let invite = CheckinInvite(sessionId: session, scenario: obj["scenario"] as? String ?? "guided.yml")
-        DispatchQueue.main.async {
-            AppState.shared.receive(invite: invite)
-            Self.postLocalNotification(for: invite)
-        }
+        }.resume()
     }
 
     /// Local notification — works without any push entitlement.

@@ -1,6 +1,7 @@
 """End-to-end tests for the push-service in DRY_RUN mode (no Apple/VERA needed)."""
 from fastapi.testclient import TestClient
 
+from app.config import Settings, get_settings
 from app.main import app, get_store
 from app.store import DeviceStore
 
@@ -10,6 +11,12 @@ def fresh_client() -> TestClient:
     # instance across requests within the test (one store per client).
     store = DeviceStore(":memory:")
     app.dependency_overrides[get_store] = lambda: store
+    # Force stub settings so tests don't read a real .env (VERA_API_BASE, etc.)
+    # and don't reach the network. dry_run keeps APNs offline.
+    test_settings = Settings(
+        vera_api_base="", provider_api_key="", dry_run=True, device_store_path=":memory:"
+    )
+    app.dependency_overrides[get_settings] = lambda: test_settings
     return TestClient(app)
 
 
@@ -77,6 +84,22 @@ def test_device_token_not_leaked():
     assert r.status_code == 200
     assert r.json()["token_preview"].endswith("…")
     assert "push_token" not in r.json()
+
+
+def test_poll_pending_returns_then_clears():
+    client = fresh_client()
+    client.post("/v1/devices/register", json={"user_id": "p7", "push_token": "tok7777777"})
+    # nothing pending yet
+    assert client.get("/v1/checkins/pending/p7").json()["invite"] is None
+    # provider starts a check-in -> it queues
+    start = client.post("/v1/checkins/start", json={"user_id": "p7"})
+    sid = start.json()["session_id"]
+    # first poll returns the invite
+    first = client.get("/v1/checkins/pending/p7").json()["invite"]
+    assert first["session_id"] == sid
+    assert first["type"] == "checkin_invite"
+    # second poll is empty (cleared)
+    assert client.get("/v1/checkins/pending/p7").json()["invite"] is None
 
 
 def test_notify_ws_receives_invite():
