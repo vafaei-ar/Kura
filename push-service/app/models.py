@@ -23,6 +23,14 @@ class DeviceRegistration(BaseModel):
     # 'voip'  = PushKit token, reserved for a future CallKit upgrade.
     token_type: Literal["alert", "voip"] = "alert"
     app_version: Optional[str] = None
+    # Participant role, declared at registration: survivor | caregiver.
+    role: str = "survivor"
+
+
+class CompleteCheckinRequest(BaseModel):
+    """Sent by the app when a check-in ends; optional self-reported urgency."""
+
+    urgency: Optional[str] = None  # routine | soon | urgent
 
 
 class Device(DeviceRegistration):

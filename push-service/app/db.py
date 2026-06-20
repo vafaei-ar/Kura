@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import String, Boolean, Text, DateTime, create_engine
+from sqlalchemy import String, Boolean, Text, DateTime, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -30,6 +30,7 @@ class Device(Base):
     push_token: Mapped[str] = mapped_column(String(512))
     platform: Mapped[str] = mapped_column(String(16), default="ios")
     token_type: Mapped[str] = mapped_column(String(16), default="alert")
+    role: Mapped[str] = mapped_column(String(16), default="survivor")
     app_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -79,7 +80,28 @@ def build_engine(database_url: str):
     else:
         engine = create_engine(url, pool_pre_ping=True, future=True)
     Base.metadata.create_all(engine)
+    _ensure_columns(engine)
     return engine
+
+
+def _ensure_columns(engine) -> None:
+    """Tiny forward-migration: add columns introduced after a table already
+    existed (create_all only creates missing *tables*, not columns). Safe to
+    run every startup; no-op once the column is present.
+    """
+    # (table, column, DDL type with default)
+    additions = [
+        ("devices", "role", "VARCHAR(16) DEFAULT 'survivor'"),
+    ]
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for table, column, ddl in additions:
+        if table not in tables:
+            continue
+        existing = {c["name"] for c in insp.get_columns(table)}
+        if column not in existing:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
 
 def make_session_factory(engine):

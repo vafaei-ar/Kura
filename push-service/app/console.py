@@ -68,19 +68,13 @@ CONSOLE_HTML = """<!DOCTYPE html>
         <option value="rag_enhanced">General check-in (AI-enhanced)</option>
       </select>
     </label>
-    <label class="muted">Answered by
-      <select id="role">
-        <option value="survivor">Survivor</option>
-        <option value="caregiver">Caregiver</option>
-      </select>
-    </label>
     <button class="ghost" onclick="loadAll()">Refresh</button>
   </div>
 
   <h2>Patients</h2>
   <table>
-    <thead><tr><th>Patient (user_id)</th><th>Device</th><th>Registered</th><th></th></tr></thead>
-    <tbody id="rows"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+    <thead><tr><th>Patient (user_id)</th><th>Role</th><th>Device</th><th>Registered</th><th></th></tr></thead>
+    <tbody id="rows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
   </table>
 
   <h2>Recent check-ins
@@ -120,10 +114,11 @@ async function loadDevices(){
     const d = await r.json();
     $("rows").innerHTML = d.length ? d.map(x=>`
       <tr><td><strong>${x.user_id}</strong></td>
+      <td><span class="pill">${x.role || 'survivor'}</span></td>
       <td><span class="pill">${x.platform}</span> <span class="muted">${x.token_preview}</span></td>
       <td class="muted">${new Date(x.registered_at).toLocaleString()}</td>
       <td><button onclick="start('${x.user_id}',this)">Start check-in</button></td></tr>`).join("")
-      : '<tr><td colspan="4" class="empty">No registered patients yet.</td></tr>';
+      : '<tr><td colspan="5" class="empty">No registered patients yet.</td></tr>';
   }catch(e){ $("rows").innerHTML = '<tr><td colspan="4" class="empty">Could not load: '+e.message+'</td></tr>'; }
 }
 
@@ -152,7 +147,7 @@ async function start(userId, btn){
   btn.disabled=true; btn.textContent="Starting…";
   try{
     const r = await fetch("/v1/checkins/start",{ method:"POST", headers:headers(),
-      body: JSON.stringify({ user_id:userId, scenario:$("scenario").value, role:$("role").value }) });
+      body: JSON.stringify({ user_id:userId, scenario:$("scenario").value }) });
     const data = await r.json();
     if(!r.ok) throw new Error(data.detail || ("HTTP "+r.status));
     toast(data.live_delivered>0 ? `Delivered to ${userId}'s phone.` : `Created for ${userId} — app will pick it up when open.`);

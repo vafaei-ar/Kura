@@ -10,6 +10,8 @@ struct CheckInView: View {
     @State private var consented = false
     @State private var pulsing = false
     @State private var typed = ""
+    @State private var chosenUrgency: String?
+    @State private var savedHistory = false
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -25,7 +27,8 @@ struct CheckInView: View {
         }
         .onChange(of: audio.state) { newState in
             if newState == .ended {
-                // Tell the server it finished so it captures VERA's flags.
+                saveHistory()
+                // Capture completion immediately (urgency is added on "Done").
                 Task { await CheckinService.complete(sessionId: invite.sessionId) }
             }
         }
@@ -74,8 +77,10 @@ struct CheckInView: View {
                 }
             }
 
-            // Type-to-answer (accessibility: for speech difficulty / aphasia).
-            if audio.state != .ended {
+            if audio.state == .ended {
+                urgencyPrompt
+            } else {
+                // Type-to-answer (accessibility: for speech difficulty / aphasia).
                 HStack(spacing: 8) {
                     TextField("Or type your answer", text: $typed)
                         .textFieldStyle(.roundedBorder)
@@ -89,19 +94,18 @@ struct CheckInView: View {
                     .buttonStyle(.borderedProminent).tint(.teal)
                     .disabled(typed.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
-            }
 
-            Button(role: .destructive) {
-                audio.disconnect()
-                state.endSession()
-            } label: {
-                Label(audio.state == .ended ? "Done" : "End check-in", systemImage: "phone.down.fill")
-                    .font(.title3.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
+                Button(role: .destructive) {
+                    audio.disconnect()   // -> .ended, then the urgency prompt shows
+                } label: {
+                    Label("End check-in", systemImage: "phone.down.fill")
+                        .font(.title3.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(audio.state == .ended ? .teal : .red)
         }
         .padding()
         .background(
@@ -177,6 +181,53 @@ struct CheckInView: View {
         audio.sendTyped(typed)
         typed = ""
         inputFocused = false   // dismiss the keyboard after sending
+    }
+
+    // MARK: - End-of-check-in (self-reported urgency)
+
+    private var urgencyPrompt: some View {
+        VStack(spacing: 12) {
+            Text("How urgent did this feel?")
+                .font(.headline)
+            Text("Optional — your care team reviews every check-in.")
+                .font(.footnote).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                urgencyChip("Routine", "routine")
+                urgencyChip("Soon", "soon")
+                urgencyChip("Urgent", "urgent")
+            }
+            Button(action: finish) {
+                Text("Done")
+                    .font(.title3.weight(.semibold))
+                    .frame(maxWidth: .infinity).padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent).tint(.teal)
+        }
+    }
+
+    private func urgencyChip(_ label: String, _ value: String) -> some View {
+        Button { chosenUrgency = value } label: {
+            Text(label).frame(maxWidth: .infinity).padding(.vertical, 8)
+        }
+        .buttonStyle(.bordered)
+        .tint(chosenUrgency == value ? .teal : .secondary)
+    }
+
+    private func finish() {
+        let urgency = chosenUrgency
+        Task { await CheckinService.complete(sessionId: invite.sessionId, urgency: urgency) }
+        state.endSession()
+    }
+
+    private func saveHistory() {
+        guard !savedHistory, !audio.transcript.isEmpty else { return }
+        savedHistory = true
+        let lines = audio.transcript.map {
+            HistoryItem.Line(speaker: $0.speaker == .user ? "you" : "bot", text: $0.text)
+        }
+        HistoryStore.add(HistoryItem(
+            id: invite.sessionId, date: Date(), scenario: invite.scenario, lines: lines
+        ))
     }
 
     private var micSymbol: String {

@@ -25,5 +25,6 @@ struct DeviceRegistrationBody: Encodable {
     let push_token: String
     let platform = "ios"
     let token_type = "alert"
+    let role: String
     let app_version: String?
 }

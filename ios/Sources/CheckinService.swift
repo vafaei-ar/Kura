@@ -25,11 +25,14 @@ enum CheckinService {
     }
 
     /// Tell the push-service the check-in finished, so it captures VERA's
-    /// clinician summary (flags) into the database for the console's reports.
-    static func complete(sessionId: String) async {
+    /// clinician summary (flags). Optionally includes the patient's
+    /// self-reported urgency ("routine" | "soon" | "urgent").
+    static func complete(sessionId: String, urgency: String? = nil) async {
         let url = Config.pushServiceBaseURL.appendingPathComponent("/v1/checkins/\(sessionId)/complete")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["urgency": urgency as Any])
         _ = try? await URLSession.shared.data(for: req)
     }
 }

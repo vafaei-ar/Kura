@@ -13,6 +13,7 @@ actor DeviceRegistrationService {
         let body = DeviceRegistrationBody(
             user_id: Config.userId,
             push_token: pushToken,
+            role: Config.role,
             app_version: appVersion
         )
 

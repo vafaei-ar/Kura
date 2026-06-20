@@ -13,7 +13,7 @@ struct ContentView: View {
                 if state.hasParticipant {
                     home
                 } else {
-                    OnboardingView { id in state.setParticipant(id) }
+                    OnboardingView { id, role in state.setParticipant(id, role: role) }
                 }
             }
             .navigationTitle("Kura")
@@ -28,6 +28,17 @@ struct ContentView: View {
         VStack(spacing: 24) {
             header
             registrationCard
+
+            NavigationLink {
+                HistoryView()
+            } label: {
+                Label("My check-ins", systemImage: "clock.arrow.circlepath")
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.bordered)
+            .tint(.teal)
+
             Spacer()
             if state.pendingInvite != nil {
                 inviteCard
@@ -145,8 +156,9 @@ struct ContentView: View {
 // MARK: - Onboarding (first launch: set the participant id)
 
 private struct OnboardingView: View {
-    let onSave: (String) -> Void
+    let onSave: (String, String) -> Void
     @State private var id = ""
+    @State private var role = "survivor"
 
     var body: some View {
         VStack(spacing: 20) {
@@ -155,7 +167,7 @@ private struct OnboardingView: View {
                 .font(.system(size: 56)).foregroundStyle(.teal)
             Text("Welcome to VERA")
                 .font(.title.weight(.bold))
-            Text("Enter the participant ID your care team gave you. This links your phone to your check-ins.")
+            Text("Enter the participant ID your care team gave you, and tell us who will be answering.")
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -168,8 +180,17 @@ private struct OnboardingView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .font(.title3)
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("I am the…").font(.subheadline).foregroundStyle(.secondary)
+                Picker("Role", selection: $role) {
+                    Text("Patient").tag("survivor")
+                    Text("Caregiver").tag("caregiver")
+                }
+                .pickerStyle(.segmented)
+            }
+
             Button {
-                onSave(id)
+                onSave(id, role)
             } label: {
                 Text("Continue")
                     .font(.title3.weight(.semibold))
@@ -181,6 +202,73 @@ private struct OnboardingView: View {
             Spacer()
         }
         .padding(24)
+    }
+}
+
+// MARK: - My check-ins (patient's own history, stored on the phone)
+
+private struct HistoryView: View {
+    private let items = HistoryStore.all()
+
+    var body: some View {
+        Group {
+            if items.isEmpty {
+                ContentUnavailableView_compat()
+            } else {
+                List(items) { item in
+                    NavigationLink {
+                        HistoryDetailView(item: item)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.date.formatted(date: .abbreviated, time: .shortened))
+                                .font(.headline)
+                            Text("\(item.lines.count) messages")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("My check-ins")
+    }
+}
+
+private struct ContentUnavailableView_compat: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 44)).foregroundStyle(.secondary)
+            Text("No check-ins yet").font(.headline)
+            Text("Your past check-ins will appear here, on your phone.")
+                .font(.subheadline).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding()
+    }
+}
+
+private struct HistoryDetailView: View {
+    let item: HistoryItem
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(item.lines.enumerated()), id: \.offset) { _, line in
+                    HStack {
+                        if line.speaker == "you" { Spacer(minLength: 40) }
+                        Text(line.text)
+                            .font(.body)
+                            .padding(12)
+                            .background(line.speaker == "you" ? Color.teal.opacity(0.15) : Color(.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                        if line.speaker == "bot" { Spacer(minLength: 40) }
+                    }
+                }
+            }
+            .padding()
+        }
+        .navigationTitle(item.date.formatted(date: .abbreviated, time: .shortened))
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

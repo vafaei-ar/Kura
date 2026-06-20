@@ -38,7 +38,12 @@ from .console import CONSOLE_HTML
 from .apns import APNsClient
 from .config import Settings, get_settings
 from .db import Checkin as CheckinRow, Device as DeviceRow, build_engine, make_session_factory
-from .models import DeviceRegistration, StartCheckinRequest, StartCheckinResponse
+from .models import (
+    CompleteCheckinRequest,
+    DeviceRegistration,
+    StartCheckinRequest,
+    StartCheckinResponse,
+)
 from .vera_client import VeraClient
 
 logging.basicConfig(level=logging.INFO)
@@ -69,7 +74,7 @@ def get_db():
 def _device_dict(d: DeviceRow) -> dict:
     return {
         "user_id": d.user_id, "platform": d.platform, "token_type": d.token_type,
-        "token_preview": d.push_token[:8] + "…", "app_version": d.app_version,
+        "role": d.role, "token_preview": d.push_token[:8] + "…", "app_version": d.app_version,
         "registered_at": d.registered_at, "updated_at": d.updated_at,
     }
 
@@ -168,6 +173,7 @@ def register_device(reg: DeviceRegistration, db: Session = Depends(get_db)) -> d
     row.push_token = reg.push_token
     row.platform = reg.platform
     row.token_type = reg.token_type
+    row.role = reg.role
     row.app_version = reg.app_version
     row.updated_at = now
     db.commit()
@@ -206,6 +212,10 @@ async def start_checkin(
             detail=f"no device registered for user_id={req.user_id!r}",
         )
 
+    # Role is a property of the participant (declared at registration), not a
+    # per-check-in choice. Use the device's role.
+    role = device.role or req.role
+
     vera = VeraClient(settings)
     try:
         session_id = await vera.start_session(
@@ -213,7 +223,7 @@ async def start_checkin(
             scenario=req.scenario,
             patient_name=req.patient_name,
             honorific=req.honorific,
-            role=req.role,
+            role=role,
         )
     except Exception as exc:  # surface VERA failures clearly to the provider
         raise HTTPException(status_code=502, detail=f"VERA session start failed: {exc}")
@@ -234,7 +244,7 @@ async def start_checkin(
     # Persist the check-in so the console can filter/report later.
     db.add(CheckinRow(
         session_id=session_id, user_id=req.user_id,
-        scenario=req.scenario, role=req.role,
+        scenario=req.scenario, role=role,
         started_at=datetime.now(timezone.utc), status="started",
     ))
     db.commit()
@@ -303,12 +313,24 @@ async def checkin_summary(
 @app.post("/v1/checkins/{session_id}/complete")
 async def complete_checkin(
     session_id: str,
+    body: CompleteCheckinRequest | None = None,
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Called by the app when the check-in ends. Marks it complete and captures
-    VERA's clinician summary (flags) into the database for reporting."""
+    """Called by the app when the check-in ends. Records the patient's
+    self-reported urgency (if any) in VERA, marks the check-in complete, and
+    captures VERA's clinician summary (flags) into the database for reporting."""
     row = db.get(CheckinRow, session_id)
+    role = row.role if row is not None else "survivor"
+
+    # Self-reported urgency first, so it's reflected in the summary we fetch.
+    if body and body.urgency:
+        vera = VeraClient(settings)
+        try:
+            await vera.record_urgency(session_id, body.urgency, role=role)
+        except Exception as exc:
+            logging.warning("urgency record failed for %s: %s", session_id, exc)
+
     if row is not None:
         row.status = "completed"
         row.completed_at = datetime.now(timezone.utc)

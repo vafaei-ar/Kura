@@ -75,3 +75,15 @@ class VeraClient:
             if resp.status_code != 200:
                 return None
             return resp.json()
+
+    async def record_urgency(self, session_id: str, urgency: str, role: str = "survivor") -> None:
+        """Record the patient's self-reported urgency (routine|soon|urgent) in VERA.
+        Advisory only — never overrides automatic flagging (VERA enforces that)."""
+        if not self.configured:
+            return
+        url = self._s.vera_api_base.rstrip("/") + f"/api/session/{session_id}/urgency"
+        headers = {}
+        if self._s.vera_api_key:
+            headers["Authorization"] = f"Bearer {self._s.vera_api_key}"
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(url, json={"urgency": urgency, "role": role}, headers=headers)

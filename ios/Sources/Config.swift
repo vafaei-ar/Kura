@@ -34,6 +34,12 @@ enum Config {
         )
     }
 
+    /// Participant role (survivor | caregiver), chosen at onboarding. The
+    /// provider console uses this automatically — it's not picked per check-in.
+    private static let roleKey = "kura.participantRole"
+    static var role: String { UserDefaults.standard.string(forKey: roleKey) ?? "survivor" }
+    static func setRole(_ r: String) { UserDefaults.standard.set(r, forKey: roleKey) }
+
     /// Derive the audio WebSocket URL for a given session.
     static func audioSocketURL(sessionId: String) -> URL {
         var comps = URLComponents(url: veraBaseURL, resolvingAgainstBaseURL: false)!

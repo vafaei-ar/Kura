@@ -28,9 +28,10 @@ final class AppState: ObservableObject {
 
     private init() {}
 
-    /// Set the participant id (from onboarding) and activate this device for it.
-    func setParticipant(_ id: String) {
+    /// Set the participant id + role (from onboarding) and activate this device.
+    func setParticipant(_ id: String, role: String) {
         Config.setUserId(id)
+        Config.setRole(role)
         participantId = Config.userId
         registerAndListen()
     }
@@ -56,5 +57,43 @@ final class AppState: ObservableObject {
 
     func endSession() {
         activeSession = nil
+    }
+}
+
+// MARK: - On-device check-in history (the patient's own copy)
+
+/// One past check-in, stored locally on the phone. Transcript only — no clinical
+/// flags/tiers (those stay on the clinician side; we don't show medical
+/// interpretation back to the patient).
+struct HistoryItem: Codable, Identifiable {
+    struct Line: Codable { let speaker: String; let text: String }  // speaker: "bot"|"you"
+    let id: String          // session_id
+    let date: Date
+    let scenario: String
+    let lines: [Line]
+}
+
+/// Simple local store: a JSON file in the app's Documents directory. Stays on
+/// the device (private to the patient); nothing is uploaded.
+enum HistoryStore {
+    private static var url: URL {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("kura_history.json")
+    }
+
+    static func all() -> [HistoryItem] {
+        guard let data = try? Data(contentsOf: url),
+              let items = try? JSONDecoder().decode([HistoryItem].self, from: data)
+        else { return [] }
+        return items.sorted { $0.date > $1.date }
+    }
+
+    static func add(_ item: HistoryItem) {
+        guard !item.lines.isEmpty else { return }
+        var items = all().filter { $0.id != item.id }   // de-dupe by session
+        items.append(item)
+        if let data = try? JSONEncoder().encode(items) {
+            try? data.write(to: url, options: .atomic)
+        }
     }
 }
