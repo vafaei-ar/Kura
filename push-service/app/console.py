@@ -83,10 +83,14 @@ CONSOLE_HTML = """<!DOCTYPE html>
     <tbody id="rows"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
   </table>
 
-  <h2>Recent check-ins</h2>
+  <h2>Recent check-ins
+    <label style="float:right;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px;color:var(--ink)">
+      <input type="checkbox" id="flagsOnly" onchange="loadHistory()"/> Red flags only
+    </label>
+  </h2>
   <table>
-    <thead><tr><th>Patient</th><th>Check-in</th><th>Started</th><th></th></tr></thead>
-    <tbody id="history"><tr><td colspan="4" class="empty">None yet.</td></tr></tbody>
+    <thead><tr><th>Patient</th><th>Check-in</th><th>Started</th><th>Status</th><th></th></tr></thead>
+    <tbody id="history"><tr><td colspan="5" class="empty">None yet.</td></tr></tbody>
   </table>
 </div>
 
@@ -123,17 +127,24 @@ async function loadDevices(){
   }catch(e){ $("rows").innerHTML = '<tr><td colspan="4" class="empty">Could not load: '+e.message+'</td></tr>'; }
 }
 
+function statusCell(x){
+  if(x.has_priority === true) return '<span style="color:var(--red);font-weight:600">⚠ Priority</span>';
+  if(x.status === "completed") return '<span style="color:#1f7a3f">✓ Routine</span>';
+  return '<span class="muted">in progress…</span>';
+}
 async function loadHistory(){
   try{
-    const r = await fetch("/v1/checkins", { headers: headers() });
-    if(!r.ok){ $("history").innerHTML='<tr><td colspan="4" class="empty">Enter the provider key, then Refresh.</td></tr>'; return; }
+    const url = "/v1/checkins" + ($("flagsOnly").checked ? "?priority_only=true" : "");
+    const r = await fetch(url, { headers: headers() });
+    if(!r.ok){ $("history").innerHTML='<tr><td colspan="5" class="empty">Enter the provider key, then Refresh.</td></tr>'; return; }
     const h = await r.json();
     $("history").innerHTML = h.length ? h.map(x=>`
       <tr><td><strong>${x.user_id}</strong></td>
       <td>${x.scenario} <span class="muted">· ${x.role}</span></td>
       <td class="muted">${new Date(x.started_at).toLocaleString()}</td>
+      <td>${statusCell(x)}</td>
       <td><button class="ghost" onclick="viewResult('${x.session_id}')">View result</button></td></tr>`).join("")
-      : '<tr><td colspan="4" class="empty">None yet.</td></tr>';
+      : '<tr><td colspan="5" class="empty">None match.</td></tr>';
   }catch(e){ /* ignore */ }
 }
 

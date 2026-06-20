@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     apns_auth_key_path: str = ""
 
     # Storage
-    device_store_path: str = ":memory:"
+    device_store_path: str = ":memory:"  # legacy JSON store (unused once DB is on)
+    # SQLAlchemy URL. Empty -> local SQLite file. Set to a Neon/Postgres URL in
+    # production (e.g. postgresql://user:pass@host/db?sslmode=require).
+    database_url: str = ""
 
     # Provider auth
     provider_api_key: str = ""

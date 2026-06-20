@@ -2,20 +2,26 @@
 from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
-from app.main import app, get_store
-from app.store import DeviceStore
+from app.db import build_engine, make_session_factory
+from app.main import app, get_db
 
 
 def fresh_client() -> TestClient:
-    # Isolate each test with its own in-memory store, but reuse the SAME
-    # instance across requests within the test (one store per client).
-    store = DeviceStore(":memory:")
-    app.dependency_overrides[get_store] = lambda: store
+    # Each test gets its own fresh in-memory database.
+    engine = build_engine("sqlite://")
+    SessionLocal = make_session_factory(engine)
+
+    def _get_db():
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _get_db
     # Force stub settings so tests don't read a real .env (VERA_API_BASE, etc.)
     # and don't reach the network. dry_run keeps APNs offline.
-    test_settings = Settings(
-        vera_api_base="", provider_api_key="", dry_run=True, device_store_path=":memory:"
-    )
+    test_settings = Settings(vera_api_base="", provider_api_key="", dry_run=True)
     app.dependency_overrides[get_settings] = lambda: test_settings
     return TestClient(app)
 
@@ -163,5 +169,5 @@ def test_register_is_idempotent_upsert():
         json={"user_id": "p3", "push_token": "tokenB11111111111"},
     )
     assert a.status_code == b.status_code == 200
-    # registered_at preserved, token updated
-    assert b.json()["push_token"] == "tokenB11111111111"
+    # token updated (masked preview reflects the new token's prefix)
+    assert b.json()["token_preview"].startswith("tokenB1")

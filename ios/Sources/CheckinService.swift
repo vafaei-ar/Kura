@@ -23,4 +23,13 @@ enum CheckinService {
         let body = try JSONDecoder().decode(ResponseBody.self, from: data)
         return CheckinInvite(sessionId: body.session_id, scenario: body.scenario ?? "guided.yml")
     }
+
+    /// Tell the push-service the check-in finished, so it captures VERA's
+    /// clinician summary (flags) into the database for the console's reports.
+    static func complete(sessionId: String) async {
+        let url = Config.pushServiceBaseURL.appendingPathComponent("/v1/checkins/\(sessionId)/complete")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        _ = try? await URLSession.shared.data(for: req)
+    }
 }

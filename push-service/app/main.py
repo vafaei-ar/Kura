@@ -30,30 +30,56 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .console import CONSOLE_HTML
 
 from .apns import APNsClient
 from .config import Settings, get_settings
-from .models import (
-    Device,
-    DeviceRegistration,
-    StartCheckinRequest,
-    StartCheckinResponse,
-)
-from .store import DeviceStore
+from .db import Checkin as CheckinRow, Device as DeviceRow, build_engine, make_session_factory
+from .models import DeviceRegistration, StartCheckinRequest, StartCheckinResponse
 from .vera_client import VeraClient
 
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Kura push-service", version="0.1.0")
 
-# Single process-wide store; created from settings at import time.
-_store = DeviceStore(get_settings().device_store_path)
+# Database engine + session factory (SQLite by default; Postgres via DATABASE_URL).
+# Built lazily on first use so importing the module never touches disk.
+_SessionLocal = None
 
 
-def get_store() -> DeviceStore:
-    return _store
+def _session_factory():
+    global _SessionLocal
+    if _SessionLocal is None:
+        engine = build_engine(get_settings().database_url)
+        _SessionLocal = make_session_factory(engine)
+    return _SessionLocal
+
+
+def get_db():
+    db = _session_factory()()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _device_dict(d: DeviceRow) -> dict:
+    return {
+        "user_id": d.user_id, "platform": d.platform, "token_type": d.token_type,
+        "token_preview": d.push_token[:8] + "…", "app_version": d.app_version,
+        "registered_at": d.registered_at, "updated_at": d.updated_at,
+    }
+
+
+def _checkin_dict(c: CheckinRow) -> dict:
+    return {
+        "session_id": c.session_id, "user_id": c.user_id, "scenario": c.scenario,
+        "role": c.role, "started_at": c.started_at, "status": c.status,
+        "has_priority": c.has_priority, "completed_at": c.completed_at,
+    }
 
 
 class NotifyManager:
@@ -102,11 +128,6 @@ notify_manager = NotifyManager()
 # app polls /v1/checkins/pending/{user_id}, which returns and clears the invite.
 _pending: Dict[str, dict] = {}
 
-# Recent check-ins the provider started (most-recent-last), so the console can
-# show a history and fetch each one's clinician summary. In-memory, capped.
-_history: list[dict] = []
-_HISTORY_MAX = 100
-
 
 def require_provider(
     x_provider_key: str | None = Header(default=None),
@@ -137,58 +158,48 @@ def health(settings: Settings = Depends(get_settings)) -> dict:
     }
 
 
-@app.post("/v1/devices/register", response_model=Device)
-def register_device(
-    reg: DeviceRegistration,
-    store: DeviceStore = Depends(get_store),
-) -> Device:
-    return store.upsert(reg)
+@app.post("/v1/devices/register")
+def register_device(reg: DeviceRegistration, db: Session = Depends(get_db)) -> dict:
+    now = datetime.now(timezone.utc)
+    row = db.get(DeviceRow, reg.user_id)
+    if row is None:
+        row = DeviceRow(user_id=reg.user_id, registered_at=now)
+        db.add(row)
+    row.push_token = reg.push_token
+    row.platform = reg.platform
+    row.token_type = reg.token_type
+    row.app_version = reg.app_version
+    row.updated_at = now
+    db.commit()
+    return _device_dict(row)
 
 
 @app.get("/v1/devices")
 def list_devices(
-    store: DeviceStore = Depends(get_store),
+    db: Session = Depends(get_db),
     _: None = Depends(require_provider),
 ) -> list[dict]:
     """List registered devices (tokens masked). Used by the provider console."""
-    return [
-        {
-            "user_id": d.user_id,
-            "platform": d.platform,
-            "token_type": d.token_type,
-            "token_preview": d.push_token[:8] + "…",
-            "registered_at": d.registered_at,
-            "updated_at": d.updated_at,
-        }
-        for d in store.all().values()
-    ]
+    rows = db.execute(select(DeviceRow).order_by(DeviceRow.registered_at.desc())).scalars().all()
+    return [_device_dict(d) for d in rows]
 
 
 @app.get("/v1/devices/{user_id}")
-def get_device(user_id: str, store: DeviceStore = Depends(get_store)) -> dict:
-    device = store.get(user_id)
-    if device is None:
+def get_device(user_id: str, db: Session = Depends(get_db)) -> dict:
+    row = db.get(DeviceRow, user_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="no device registered for user_id")
-    # Never echo the full token back.
-    return {
-        "user_id": device.user_id,
-        "platform": device.platform,
-        "token_type": device.token_type,
-        "token_preview": device.push_token[:8] + "…",
-        "app_version": device.app_version,
-        "registered_at": device.registered_at,
-        "updated_at": device.updated_at,
-    }
+    return _device_dict(row)
 
 
 @app.post("/v1/checkins/start", response_model=StartCheckinResponse)
 async def start_checkin(
     req: StartCheckinRequest,
     settings: Settings = Depends(get_settings),
-    store: DeviceStore = Depends(get_store),
+    db: Session = Depends(get_db),
     _: None = Depends(require_provider),
 ) -> StartCheckinResponse:
-    device = store.get(req.user_id)
+    device = db.get(DeviceRow, req.user_id)
     if device is None:
         raise HTTPException(
             status_code=404,
@@ -220,15 +231,13 @@ async def start_checkin(
     # ...and also push to any live WebSocket (instant path, when available).
     live_delivered = await notify_manager.deliver(req.user_id, invite)
 
-    # Record in history so the console can show results later.
-    _history.append({
-        "session_id": session_id,
-        "user_id": req.user_id,
-        "scenario": req.scenario,
-        "role": req.role,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-    })
-    del _history[:-_HISTORY_MAX]
+    # Persist the check-in so the console can filter/report later.
+    db.add(CheckinRow(
+        session_id=session_id, user_id=req.user_id,
+        scenario=req.scenario, role=req.role,
+        started_at=datetime.now(timezone.utc), status="started",
+    ))
+    db.commit()
 
     return StartCheckinResponse(
         session_id=session_id,
@@ -241,26 +250,71 @@ async def start_checkin(
 
 
 @app.get("/v1/checkins")
-def list_checkins(_: None = Depends(require_provider)) -> list[dict]:
-    """Recent check-ins the provider started (most recent first)."""
-    return list(reversed(_history))
+def list_checkins(
+    db: Session = Depends(get_db),
+    priority_only: bool = False,
+    user_id: str | None = None,
+    _: None = Depends(require_provider),
+) -> list[dict]:
+    """Recent check-ins (most recent first), with optional filters for the
+    red-flag report: priority_only=true shows only flagged check-ins."""
+    stmt = select(CheckinRow).order_by(CheckinRow.started_at.desc()).limit(200)
+    if priority_only:
+        stmt = stmt.where(CheckinRow.has_priority.is_(True))
+    if user_id:
+        stmt = stmt.where(CheckinRow.user_id == user_id)
+    return [_checkin_dict(c) for c in db.execute(stmt).scalars().all()]
+
+
+async def _fetch_and_store_summary(
+    session_id: str, settings: Settings, db: Session
+) -> dict | None:
+    """Get VERA's clinician summary and persist it on the check-in row."""
+    vera = VeraClient(settings)
+    summary = await vera.clinician_summary(session_id)
+    if summary is None:
+        return None
+    row = db.get(CheckinRow, session_id)
+    if row is not None:
+        row.summary_json = json.dumps(summary)
+        row.has_priority = bool(summary.get("has_priority"))
+        db.commit()
+    return summary
 
 
 @app.get("/v1/checkins/{session_id}/summary")
 async def checkin_summary(
     session_id: str,
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
     _: None = Depends(require_provider),
 ) -> dict:
-    """Clinician summary (flags + tiers) for a check-in, proxied from VERA.
-
-    Returns {"ready": false} until VERA has an outcome for the session.
-    """
-    vera = VeraClient(settings)
-    summary = await vera.clinician_summary(session_id)
+    """Clinician summary (flags + tiers). Returns the stored copy if we have it,
+    else fetches from VERA (and stores it). {"ready": false} until available."""
+    row = db.get(CheckinRow, session_id)
+    if row is not None and row.summary_json:
+        return {"ready": True, "summary": json.loads(row.summary_json), "stored": True}
+    summary = await _fetch_and_store_summary(session_id, settings, db)
     if summary is None:
         return {"ready": False, "session_id": session_id}
     return {"ready": True, "summary": summary}
+
+
+@app.post("/v1/checkins/{session_id}/complete")
+async def complete_checkin(
+    session_id: str,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Called by the app when the check-in ends. Marks it complete and captures
+    VERA's clinician summary (flags) into the database for reporting."""
+    row = db.get(CheckinRow, session_id)
+    if row is not None:
+        row.status = "completed"
+        row.completed_at = datetime.now(timezone.utc)
+        db.commit()
+    summary = await _fetch_and_store_summary(session_id, settings, db)
+    return {"ok": True, "has_priority": bool(summary.get("has_priority")) if summary else None}
 
 
 @app.get("/v1/checkins/pending/{user_id}")

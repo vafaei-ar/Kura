@@ -10,6 +10,7 @@ struct CheckInView: View {
     @State private var consented = false
     @State private var pulsing = false
     @State private var typed = ""
+    @FocusState private var inputFocused: Bool
 
     var body: some View {
         Group {
@@ -23,7 +24,10 @@ struct CheckInView: View {
             }
         }
         .onChange(of: audio.state) { newState in
-            if newState == .ended { /* keep screen so patient sees the summary */ }
+            if newState == .ended {
+                // Tell the server it finished so it captures VERA's flags.
+                Task { await CheckinService.complete(sessionId: invite.sessionId) }
+            }
         }
         .onDisappear { audio.disconnect() }
     }
@@ -45,18 +49,22 @@ struct CheckInView: View {
             transcriptList
 
             // Big, clear turn cue.
-            VStack(spacing: 10) {
-                Image(systemName: micSymbol)
-                    .font(.system(size: 54))
-                    .foregroundStyle(isListening ? .teal : .secondary)
-                    .scaleEffect(pulsing && isListening ? 1.10 : 1.0)
-                    .opacity(pulsing && isListening ? 0.6 : 1.0)
-                    .animation(isListening ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
-                               value: pulsing)
-                    .onAppear { pulsing = true }
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(isListening ? Color.teal.opacity(0.15) : Color.gray.opacity(0.10))
+                        .frame(width: 116, height: 116)
+                        .scaleEffect(pulsing && isListening ? 1.12 : 1.0)
+                        .animation(isListening ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
+                                   value: pulsing)
+                    Image(systemName: micSymbol)
+                        .font(.system(size: 48))
+                        .foregroundStyle(isListening ? .teal : .secondary)
+                }
+                .onAppear { pulsing = true }
 
                 Text(statusText)
-                    .font(.title3.weight(.semibold))
+                    .font(.title2.weight(.semibold))
                     .multilineTextAlignment(.center)
 
                 if !audio.partialUserText.isEmpty {
@@ -73,6 +81,7 @@ struct CheckInView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.title3)
                         .submitLabel(.send)
+                        .focused($inputFocused)
                         .onSubmit(sendTyped)
                     Button(action: sendTyped) {
                         Image(systemName: "paperplane.fill").font(.title3)
@@ -95,6 +104,17 @@ struct CheckInView: View {
             .tint(audio.state == .ended ? .teal : .red)
         }
         .padding()
+        .background(
+            LinearGradient(colors: [Color.teal.opacity(0.10), Color(.systemBackground)],
+                           startPoint: .top, endPoint: .center)
+                .ignoresSafeArea()
+        )
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { inputFocused = false }
+            }
+        }
     }
 
     private var transcriptList: some View {
@@ -108,6 +128,7 @@ struct CheckInView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 4)
             }
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: audio.transcript.count) { _ in
                 if let last = audio.transcript.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -155,6 +176,7 @@ struct CheckInView: View {
     private func sendTyped() {
         audio.sendTyped(typed)
         typed = ""
+        inputFocused = false   // dismiss the keyboard after sending
     }
 
     private var micSymbol: String {
