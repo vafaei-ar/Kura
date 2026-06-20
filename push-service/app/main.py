@@ -339,6 +339,24 @@ async def complete_checkin(
     return {"ok": True, "has_priority": bool(summary.get("has_priority")) if summary else None}
 
 
+@app.get("/v1/resources")
+async def resources(
+    region: str | None = None,
+    need: str | None = None,
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """Patient-facing: curated local resources (info-only) proxied from VERA.
+    Open to the app (no provider key) — it carries no clinical content."""
+    data = await VeraClient(settings).get_resources(region, need)
+    return data or {"resources": {}, "disclaimer": "Resources are currently unavailable."}
+
+
+@app.get("/v1/resource-regions")
+async def resource_regions(settings: Settings = Depends(get_settings)) -> dict:
+    data = await VeraClient(settings).get_resource_regions()
+    return data or {"regions": [], "needs": ["transportation", "meals", "rehab", "devices", "support"]}
+
+
 @app.get("/v1/checkins/pending/{user_id}")
 def poll_pending(user_id: str) -> dict:
     """The app polls this every few seconds. Returns the queued check-in invite

@@ -87,3 +87,26 @@ class VeraClient:
             headers["Authorization"] = f"Bearer {self._s.vera_api_key}"
         async with httpx.AsyncClient(timeout=15) as client:
             await client.post(url, json={"urgency": urgency, "role": role}, headers=headers)
+
+    async def get_resources(self, region: str | None = None, need: str | None = None) -> dict | None:
+        """Curated local resources (transportation, support, ...) from VERA's
+        info-only directory. Returns None if VERA isn't configured."""
+        if not self.configured:
+            return None
+        url = self._s.vera_api_base.rstrip("/") + "/api/resources"
+        params = {}
+        if region:
+            params["region"] = region
+        if need:
+            params["need"] = need
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params=params)
+            return resp.json() if resp.status_code == 200 else None
+
+    async def get_resource_regions(self) -> dict | None:
+        if not self.configured:
+            return None
+        url = self._s.vera_api_base.rstrip("/") + "/api/resource-regions"
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url)
+            return resp.json() if resp.status_code == 200 else None

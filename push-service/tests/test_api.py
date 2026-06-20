@@ -56,6 +56,15 @@ def test_register_then_start_checkin():
     assert body["session_id"]  # a stubbed UUID when VERA is not configured
 
 
+def test_resources_unavailable_without_vera():
+    client = fresh_client()
+    r = client.get("/v1/resources?need=transportation")
+    assert r.status_code == 200
+    assert "disclaimer" in r.json()
+    regions = client.get("/v1/resource-regions").json()
+    assert "transportation" in regions["needs"]
+
+
 def test_console_served():
     client = fresh_client()
     r = client.get("/")

@@ -39,6 +39,16 @@ struct ContentView: View {
             .buttonStyle(.bordered)
             .tint(.teal)
 
+            NavigationLink {
+                ResourcesView()
+            } label: {
+                Label("Help & resources", systemImage: "lifepreserver")
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.bordered)
+            .tint(.teal)
+
             Spacer()
             if state.pendingInvite != nil {
                 inviteCard
@@ -269,6 +279,97 @@ private struct HistoryDetailView: View {
         }
         .navigationTitle(item.date.formatted(date: .abbreviated, time: .shortened))
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Help & resources (info-only, from VERA's curated directory)
+
+private struct ResItem: Identifiable {
+    let id = UUID()
+    let title: String
+    let detail: String?
+    let phone: String?
+    let url: String?
+}
+private struct ResCategory: Identifiable {
+    let id = UUID()
+    let name: String
+    let items: [ResItem]
+}
+
+private struct ResourcesView: View {
+    @State private var categories: [ResCategory] = []
+    @State private var disclaimer = ""
+    @State private var loading = true
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if loading {
+                ProgressView("Loading…")
+            } else if failed || categories.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "lifepreserver").font(.system(size: 44)).foregroundStyle(.secondary)
+                    Text("No resources available").font(.headline)
+                    Text("Your care team's resource list isn't available right now.")
+                        .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }.padding()
+            } else {
+                List {
+                    ForEach(categories) { cat in
+                        Section(cat.name.capitalized) {
+                            ForEach(cat.items) { item in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.title).font(.headline)
+                                    if let d = item.detail { Text(d).font(.subheadline).foregroundStyle(.secondary) }
+                                    if let p = item.phone, let u = URL(string: "tel:\(p.filter { $0.isNumber })") {
+                                        Link(destination: u) { Label(p, systemImage: "phone.fill").font(.subheadline) }
+                                    }
+                                    if let s = item.url, let u = URL(string: s) {
+                                        Link(destination: u) { Label("Website", systemImage: "safari").font(.subheadline) }
+                                    }
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        }
+                    }
+                    if !disclaimer.isEmpty {
+                        Section { Text(disclaimer).font(.footnote).foregroundStyle(.secondary) }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Help & resources")
+        .task { await load() }
+    }
+
+    private func load() async {
+        let url = Config.pushServiceBaseURL.appendingPathComponent("/v1/resources")
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                failed = true; loading = false; return
+            }
+            disclaimer = obj["disclaimer"] as? String ?? ""
+            var cats: [ResCategory] = []
+            if let res = obj["resources"] as? [String: [[String: Any]]] {
+                for (name, list) in res where !list.isEmpty {
+                    let items = list.map { d in
+                        ResItem(
+                            title: (d["name"] ?? d["title"]) as? String ?? "Resource",
+                            detail: (d["description"] ?? d["notes"] ?? d["detail"]) as? String,
+                            phone: d["phone"] as? String,
+                            url: (d["url"] ?? d["link"] ?? d["website"]) as? String
+                        )
+                    }
+                    cats.append(ResCategory(name: name, items: items))
+                }
+            }
+            categories = cats.sorted { $0.name < $1.name }
+        } catch {
+            failed = true
+        }
+        loading = false
     }
 }
 
