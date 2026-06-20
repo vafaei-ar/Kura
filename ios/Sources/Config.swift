@@ -16,15 +16,24 @@ enum Config {
     static let pushServiceBaseURL = URL(string: "http://10.0.0.207:8000")!
 
     /// Base URL of VERA-cloud (the voice engine). The app opens
-    /// `wss://<host>/ws/audio/<session_id>` against this host.
-    /// TODO: point at your real VERA-cloud URL (use wss:// in production).
-    /// For now it shares the dev host as a placeholder.
-    static let veraBaseURL = URL(string: "http://10.0.0.207:8000")!
+    /// `wss://<host>/ws/audio/<session_id>` against this host. Points at the
+    /// deployed Azure web app (https → wss automatically).
+    static let veraBaseURL = URL(string: "https://vera-cloud-app-dbhrdyfbg8cyhfam.eastus2-01.azurewebsites.net")!
 
-    /// Stable participant identifier for this device's user.
-    /// In the trial this is assigned at enrollment; here it's a placeholder.
-    /// TODO: replace with the real enrollment-provided user_id.
-    static let userId = "patient-001"
+    /// Stable participant identifier for this device's user, persisted across
+    /// launches. Empty until the patient enters it on the onboarding screen
+    /// (assigned at enrollment in the real trial). Each phone has its own id,
+    /// which is what the provider console uses to reach this device.
+    private static let participantKey = "kura.participantId"
+    static var userId: String {
+        UserDefaults.standard.string(forKey: participantKey) ?? ""
+    }
+    static var hasUserId: Bool { !userId.isEmpty }
+    static func setUserId(_ id: String) {
+        UserDefaults.standard.set(
+            id.trimmingCharacters(in: .whitespacesAndNewlines), forKey: participantKey
+        )
+    }
 
     /// Derive the audio WebSocket URL for a given session.
     static func audioSocketURL(sessionId: String) -> URL {

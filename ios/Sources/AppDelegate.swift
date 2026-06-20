@@ -23,20 +23,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             if let userInfo = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {
                 handleCheckinPush(userInfo)
             }
-        } else {
+        } else if Config.hasUserId {
             // Free personal team: skip APNs (it can abort on non-entitled builds).
-            // Register a placeholder token and use the live notify WebSocket
-            // instead of real push.
-            let placeholder = "SIMULATED-" + (UIDevice.current.identifierForVendor?.uuidString ?? "dev")
-            Task { await DeviceRegistrationService.shared.register(pushToken: placeholder) }
-            NotifyClient.shared.start()
+            // Register this device + open the live notify channel. If no
+            // participant id is set yet, onboarding will trigger this instead.
+            AppState.shared.registerAndListen()
         }
         return true
     }
 
     /// Reconnect the live notify socket whenever the app comes to the foreground.
     func applicationDidBecomeActive(_ application: UIApplication) {
-        if !Config.pushEnabled {
+        if !Config.pushEnabled, Config.hasUserId {
             NotifyClient.shared.start()
         }
     }
