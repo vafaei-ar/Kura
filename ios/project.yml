@@ -21,9 +21,11 @@ targets:
     platform: iOS
     sources:
       - Sources
+      - Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.vafaei-ar.kura   # must match APNS_BUNDLE_ID
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"     # iPhone
     # XcodeGen GENERATES this Info.plist (always includes CFBundleExecutable,
     # CFBundleIdentifier, etc.) and merges in the custom keys below. This avoids
@@ -38,6 +40,11 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSMicrophoneUsageDescription: "Kura uses the microphone so you can talk with your VERA care check-in."
+        NSSpeechRecognitionUsageDescription: "Kura transcribes your spoken answers on-device so your care check-in can respond."
+        NSLocalNetworkUsageDescription: "Kura connects to your care server on the local network to set up check-ins."
+        # DEV ONLY: allow cleartext HTTP to the push-service LAN IP. Tighten before any real deployment.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
         UIBackgroundModes:
           - remote-notification
           - audio

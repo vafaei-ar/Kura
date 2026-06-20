@@ -2,47 +2,35 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>Kura</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
-	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>LSRequiresIPhoneOS</key>
-	<true/>
-	<key>UIRequiredDeviceCapabilities</key>
-	<array>
-		<string>arm64</string>
-	</array>
-	<key>UISupportedInterfaceOrientations</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-	</array>
+	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>$(MARKETING_VERSION)</string>
+	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Kura uses the microphone so you can talk with your VERA care check-in.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Kura transcribes your spoken answers on-device so your care check-in can respond.</string>
-	<!-- Required so the app can reach the push-service on your local network
-	     (a private LAN IP). iOS shows a one-time "allow local network" prompt. -->
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Kura connects to your care server on the local network to set up check-ins.</string>
-	<!-- DEV ONLY: allow cleartext HTTP so the phone can reach the push-service
-	     on your Mac's LAN IP. Remove / restrict before any real deployment. -->
+	<string>1</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Kura connects to your care server on the local network to set up check-ins.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Kura uses the microphone so you can talk with your VERA care check-in.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Kura transcribes your spoken answers on-device so your care check-in can respond.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -55,5 +43,9 @@
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
 </dict>
 </plist>

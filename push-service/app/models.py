@@ -39,6 +39,7 @@ class StartCheckinRequest(BaseModel):
     scenario: str = "guided.yml"
     patient_name: str = ""
     honorific: str = ""
+    role: str = "survivor"  # survivor | caregiver | clinician (VERA role track)
 
 
 class StartCheckinResponse(BaseModel):

@@ -29,6 +29,7 @@ class VeraClient:
         scenario: str,
         patient_name: str,
         honorific: str,
+        role: str = "survivor",
     ) -> str:
         """Return a session_id for a new check-in."""
         if not self.configured:
@@ -40,11 +41,14 @@ class VeraClient:
         if self._s.vera_api_key:
             headers["Authorization"] = f"Bearer {self._s.vera_api_key}"
 
+        # Matches VERA-cloud SessionStartRequest (api/main.py): patient_name and
+        # role are required; patient_id is the optional PATID for history lookup.
         payload = {
+            "patient_name": patient_name or user_id,
+            "role": role,
             "patient_id": user_id,
-            "scenario": scenario,
-            "patient_name": patient_name,
             "honorific": honorific,
+            "scenario": scenario,
         }
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(url, json=payload, headers=headers)
