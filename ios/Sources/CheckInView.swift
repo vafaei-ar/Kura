@@ -20,13 +20,14 @@ struct CheckInView: View {
                 liveSession
             } else {
                 ConsentView(
-                    onStart: { consented = true; audio.connect(sessionId: invite.sessionId) },
+                    onStart: { Haptics.tap(); consented = true; audio.connect(sessionId: invite.sessionId) },
                     onDecline: { state.endSession() }
                 )
             }
         }
         .onChange(of: audio.state) { newState in
             if newState == .ended {
+                Haptics.success()
                 saveHistory()
                 // Capture completion immediately (urgency is added on "Done").
                 Task { await CheckinService.complete(sessionId: invite.sessionId) }
@@ -67,7 +68,7 @@ struct CheckInView: View {
                 .onAppear { pulsing = true }
 
                 Text(statusText)
-                    .font(.title2.weight(.semibold))
+                    .font(.system(.title2, design: .rounded).weight(.semibold))
                     .multilineTextAlignment(.center)
 
                 if !audio.partialUserText.isEmpty {

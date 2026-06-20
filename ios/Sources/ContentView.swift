@@ -13,7 +13,9 @@ struct ContentView: View {
                 if state.hasParticipant {
                     home
                 } else {
-                    OnboardingView { id, role in state.setParticipant(id, role: role) }
+                    OnboardingView { id, role, name in
+                        state.setParticipant(id, role: role, name: name)
+                    }
                 }
             }
             .navigationTitle("Kura")
@@ -67,14 +69,23 @@ struct ContentView: View {
                 .background(Theme.brand)
                 .clipShape(Circle())
                 .shadow(color: Theme.teal.opacity(0.35), radius: 12, y: 6)
-            Text("VERA check-ins")
-                .font(.system(.title2, design: .rounded).weight(.bold))
-            Text("Your care team can start a short voice check-in. You'll get a notification when one is ready.")
+            Text(greeting)
+                .font(.system(.title, design: .rounded).weight(.bold))
+                .multilineTextAlignment(.center)
+            Text("Your care team can start a short voice check-in whenever it's time.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .padding(.top, 8)
+    }
+
+    /// Friendly, time-of-day greeting — uses the patient's name when we have it.
+    private var greeting: String {
+        let h = Calendar.current.component(.hour, from: Date())
+        let part = h < 12 ? "Good morning" : (h < 18 ? "Good afternoon" : "Good evening")
+        let name = state.displayName.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "\(part) 👋" : "\(part), \(name) 👋"
     }
 
     private var registrationCard: some View {
@@ -113,6 +124,7 @@ struct ContentView: View {
                 .multilineTextAlignment(.center)
             if let invite = state.pendingInvite {
                 Button {
+                    Haptics.tap()
                     state.accept(invite)
                 } label: {
                     Label("Start check-in", systemImage: "mic.fill")
@@ -176,9 +188,10 @@ struct ContentView: View {
 // MARK: - Onboarding (first launch: set the participant id)
 
 private struct OnboardingView: View {
-    let onSave: (String, String) -> Void
+    let onSave: (String, String, String) -> Void
     @State private var id = ""
     @State private var role = "survivor"
+    @State private var name = ""
 
     var body: some View {
         VStack(spacing: 22) {
@@ -197,6 +210,13 @@ private struct OnboardingView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
 
+            TextField("First name (optional)", text: $name)
+                .textContentType(.givenName)
+                .padding()
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .font(.title3)
+
             TextField("Participant ID", text: $id)
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
@@ -214,7 +234,7 @@ private struct OnboardingView: View {
                 .pickerStyle(.segmented)
             }
 
-            Button { onSave(id, role) } label: { Text("Continue") }
+            Button { onSave(id, role, name) } label: { Text("Continue") }
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(id.trimmingCharacters(in: .whitespaces).isEmpty)
                 .opacity(id.trimmingCharacters(in: .whitespaces).isEmpty ? 0.6 : 1)
@@ -240,17 +260,25 @@ private struct HistoryView: View {
                     NavigationLink {
                         HistoryDetailView(item: item)
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.date.formatted(date: .abbreviated, time: .shortened))
-                                .font(.headline)
-                            Text("\(item.lines.count) messages")
-                                .font(.subheadline).foregroundStyle(.secondary)
+                        HStack(spacing: 12) {
+                            Image(systemName: "waveform.circle.fill")
+                                .font(.title2).foregroundStyle(Theme.teal)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(item.date.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.system(.headline, design: .rounded))
+                                Text("\(item.lines.count) messages")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                            }
                         }
+                        .padding(.vertical, 4)
                     }
+                    .listRowBackground(Color(.secondarySystemBackground))
                 }
+                .scrollContentBackground(.hidden)
             }
         }
         .navigationTitle("My check-ins")
+        .background(Theme.screen.ignoresSafeArea())
     }
 }
 
@@ -328,10 +356,10 @@ private struct ResourcesView: View {
             } else {
                 List {
                     ForEach(categories) { cat in
-                        Section(cat.name.capitalized) {
+                        Section {
                             ForEach(cat.items) { item in
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(item.title).font(.headline)
+                                    Text(item.title).font(.system(.headline, design: .rounded))
                                     if let d = item.detail { Text(d).font(.subheadline).foregroundStyle(.secondary) }
                                     if let p = item.phone, let u = URL(string: "tel:\(p.filter { $0.isNumber })") {
                                         Link(destination: u) { Label(p, systemImage: "phone.fill").font(.subheadline) }
@@ -342,16 +370,37 @@ private struct ResourcesView: View {
                                 }
                                 .padding(.vertical, 2)
                             }
+                            .listRowBackground(Color(.secondarySystemBackground))
+                        } header: {
+                            Label(cat.name.capitalized, systemImage: categoryIcon(cat.name))
+                                .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                                .foregroundStyle(Theme.teal)
                         }
                     }
                     if !disclaimer.isEmpty {
-                        Section { Text(disclaimer).font(.footnote).foregroundStyle(.secondary) }
+                        Section {
+                            Text(disclaimer).font(.footnote).foregroundStyle(.secondary)
+                                .listRowBackground(Color.clear)
+                        }
                     }
                 }
+                .scrollContentBackground(.hidden)
             }
         }
         .navigationTitle("Help & resources")
+        .background(Theme.screen.ignoresSafeArea())
         .task { await load() }
+    }
+
+    private func categoryIcon(_ name: String) -> String {
+        switch name.lowercased() {
+        case "transportation": return "car.fill"
+        case "meals": return "fork.knife"
+        case "rehab": return "figure.walk"
+        case "devices": return "wheelchair"
+        case "support": return "person.2.fill"
+        default: return "lifepreserver"
+        }
     }
 
     private func load() async {

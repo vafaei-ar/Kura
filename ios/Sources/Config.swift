@@ -40,11 +40,20 @@ enum Config {
     static var role: String { UserDefaults.standard.string(forKey: roleKey) ?? "survivor" }
     static func setRole(_ r: String) { UserDefaults.standard.set(r, forKey: roleKey) }
 
+    /// Friendly display name (first name), optional — used only for greetings.
+    /// Stays on the device.
+    private static let nameKey = "kura.displayName"
+    static var displayName: String { UserDefaults.standard.string(forKey: nameKey) ?? "" }
+    static func setDisplayName(_ n: String) {
+        UserDefaults.standard.set(n.trimmingCharacters(in: .whitespacesAndNewlines), forKey: nameKey)
+    }
+
     /// Clear the saved participant (returns the app to onboarding). Useful for
     /// switching between participants/demo records.
     static func clearParticipant() {
         UserDefaults.standard.removeObject(forKey: participantKey)
         UserDefaults.standard.removeObject(forKey: roleKey)
+        UserDefaults.standard.removeObject(forKey: nameKey)
     }
 
     /// Derive the audio WebSocket URL for a given session.

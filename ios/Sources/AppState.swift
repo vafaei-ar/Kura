@@ -2,6 +2,12 @@ import Foundation
 import Combine
 import UIKit
 
+/// Tiny haptic helper for premium tactile feedback on key actions.
+enum Haptics {
+    static func tap() { UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
+    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+}
+
 /// Shared, observable app state. Single source of truth for the UI.
 @MainActor
 final class AppState: ObservableObject {
@@ -18,6 +24,7 @@ final class AppState: ObservableObject {
 
     /// This device's participant id (empty until onboarding sets it).
     @Published var participantId: String = Config.userId
+    @Published var displayName: String = Config.displayName
     var hasParticipant: Bool { !participantId.isEmpty }
 
     /// A check-in the user has been invited to (arrived via push), not yet joined.
@@ -28,11 +35,13 @@ final class AppState: ObservableObject {
 
     private init() {}
 
-    /// Set the participant id + role (from onboarding) and activate this device.
-    func setParticipant(_ id: String, role: String) {
+    /// Set the participant id + role + name (from onboarding) and activate.
+    func setParticipant(_ id: String, role: String, name: String) {
         Config.setUserId(id)
         Config.setRole(role)
+        Config.setDisplayName(name)
         participantId = Config.userId
+        displayName = Config.displayName
         registerAndListen()
     }
 
@@ -42,6 +51,7 @@ final class AppState: ObservableObject {
         Config.clearParticipant()
         NotifyClient.shared.stop()
         participantId = ""
+        displayName = ""
         registration = .unknown
         pendingInvite = nil
         activeSession = nil
