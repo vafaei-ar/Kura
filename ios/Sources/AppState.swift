@@ -36,6 +36,17 @@ final class AppState: ObservableObject {
         registerAndListen()
     }
 
+    /// Forget the current participant and return to onboarding (lets you switch
+    /// participants / demo records without reinstalling).
+    func clearParticipant() {
+        Config.clearParticipant()
+        NotifyClient.shared.stop()
+        participantId = ""
+        registration = .unknown
+        pendingInvite = nil
+        activeSession = nil
+    }
+
     /// Free-team activation: register this device and open the live notify channel.
     /// (When Config.pushEnabled is true, AppDelegate uses real APNs instead.)
     func registerAndListen() {

@@ -40,6 +40,13 @@ enum Config {
     static var role: String { UserDefaults.standard.string(forKey: roleKey) ?? "survivor" }
     static func setRole(_ r: String) { UserDefaults.standard.set(r, forKey: roleKey) }
 
+    /// Clear the saved participant (returns the app to onboarding). Useful for
+    /// switching between participants/demo records.
+    static func clearParticipant() {
+        UserDefaults.standard.removeObject(forKey: participantKey)
+        UserDefaults.standard.removeObject(forKey: roleKey)
+    }
+
     /// Derive the audio WebSocket URL for a given session.
     static func audioSocketURL(sessionId: String) -> URL {
         var comps = URLComponents(url: veraBaseURL, resolvingAgainstBaseURL: false)!

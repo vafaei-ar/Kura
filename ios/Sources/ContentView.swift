@@ -81,6 +81,8 @@ struct ContentView: View {
                     Text("Participant")
                     Spacer()
                     Text(state.participantId).foregroundStyle(.secondary)
+                    Button("Switch") { state.clearParticipant() }
+                        .font(.caption).buttonStyle(.borderless)
                 }
                 Divider()
                 HStack {
