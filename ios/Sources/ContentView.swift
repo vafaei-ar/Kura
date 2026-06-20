@@ -25,102 +25,110 @@ struct ContentView: View {
     }
 
     private var home: some View {
-        VStack(spacing: 24) {
-            header
-            registrationCard
+        ScrollView {
+            VStack(spacing: 18) {
+                header
 
-            NavigationLink {
-                HistoryView()
-            } label: {
-                Label("My check-ins", systemImage: "clock.arrow.circlepath")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.bordered)
-            .tint(.teal)
+                if state.pendingInvite != nil {
+                    inviteCard
+                }
 
-            NavigationLink {
-                ResourcesView()
-            } label: {
-                Label("Help & resources", systemImage: "lifepreserver")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.bordered)
-            .tint(.teal)
+                registrationCard
 
-            Spacer()
-            if state.pendingInvite != nil {
-                inviteCard
+                NavigationLink {
+                    HistoryView()
+                } label: {
+                    ActionTile(title: "My check-ins", systemImage: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.plain)
+
+                NavigationLink {
+                    ResourcesView()
+                } label: {
+                    ActionTile(title: "Help & resources", systemImage: "lifepreserver")
+                }
+                .buttonStyle(.plain)
+
+                #if DEBUG
+                devTools
+                #endif
             }
-            #if DEBUG
-            devTools
-            #endif
+            .padding()
         }
-        .padding()
+        .screenBackground()
     }
 
     private var header: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "phone.bubble.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.teal)
+        VStack(spacing: 10) {
+            Image(systemName: "waveform")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 84, height: 84)
+                .background(Theme.brand)
+                .clipShape(Circle())
+                .shadow(color: Theme.teal.opacity(0.35), radius: 12, y: 6)
             Text("VERA check-ins")
-                .font(.headline)
+                .font(.system(.title2, design: .rounded).weight(.bold))
             Text("Your care team can start a short voice check-in. You'll get a notification when one is ready.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
+        .padding(.top, 8)
     }
 
     private var registrationCard: some View {
-        GroupBox {
-            VStack(spacing: 10) {
-                HStack {
-                    Text("Participant")
-                    Spacer()
-                    Text(state.participantId).foregroundStyle(.secondary)
-                    Button("Switch") { state.clearParticipant() }
-                        .font(.caption).buttonStyle(.borderless)
-                }
-                Divider()
-                HStack {
-                    Text("Device status")
-                    Spacer()
-                    switch state.registration {
-                    case .unknown:      Label("Not registered", systemImage: "circle")
-                    case .registering:  Label("Registering…", systemImage: "arrow.triangle.2.circlepath")
-                    case .registered:   Label("Ready", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                    case .failed(let m): Label(m, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    }
+        VStack(spacing: 12) {
+            HStack {
+                Text("Participant").foregroundStyle(.secondary)
+                Spacer()
+                Text(state.participantId).fontWeight(.semibold)
+                Button("Switch") { state.clearParticipant() }
+                    .font(.caption.weight(.semibold)).buttonStyle(.borderless).tint(Theme.teal)
+            }
+            Divider()
+            HStack {
+                Text("Device status").foregroundStyle(.secondary)
+                Spacer()
+                switch state.registration {
+                case .unknown:      Label("Not registered", systemImage: "circle")
+                case .registering:  Label("Registering…", systemImage: "arrow.triangle.2.circlepath")
+                case .registered:   Label("Ready", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                case .failed(let m): Label(m, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
             }
-            .font(.subheadline)
         }
+        .font(.subheadline)
+        .card()
     }
 
     private var inviteCard: some View {
-        GroupBox {
-            VStack(spacing: 12) {
-                Text("Check-in ready")
-                    .font(.headline)
-                Text("Your care team has a quick voice check-in for you.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                if let invite = state.pendingInvite {
-                    Button {
-                        state.accept(invite)
-                    } label: {
-                        Label("Start check-in", systemImage: "mic.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.teal)
+        VStack(spacing: 12) {
+            Label("Check-in ready", systemImage: "bell.badge.fill")
+                .font(.system(.headline, design: .rounded))
+                .foregroundStyle(Theme.teal)
+            Text("Your care team has a quick voice check-in for you.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            if let invite = state.pendingInvite {
+                Button {
+                    state.accept(invite)
+                } label: {
+                    Label("Start check-in", systemImage: "mic.fill")
                 }
+                .buttonStyle(PrimaryButtonStyle())
             }
         }
+        .padding(4)
+        .frame(maxWidth: .infinity)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Theme.tealLight.opacity(0.14))
+                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Theme.tealLight.opacity(0.5), lineWidth: 1))
+        )
     }
 
     // MARK: - Dev tools (DEBUG builds only)
@@ -173,12 +181,17 @@ private struct OnboardingView: View {
     @State private var role = "survivor"
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 22) {
             Spacer()
-            Image(systemName: "person.text.rectangle.fill")
-                .font(.system(size: 56)).foregroundStyle(.teal)
+            Image(systemName: "waveform")
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 96, height: 96)
+                .background(Theme.brand)
+                .clipShape(Circle())
+                .shadow(color: Theme.teal.opacity(0.35), radius: 14, y: 7)
             Text("Welcome to VERA")
-                .font(.title.weight(.bold))
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
             Text("Enter the participant ID your care team gave you, and tell us who will be answering.")
                 .font(.callout)
                 .multilineTextAlignment(.center)
@@ -189,7 +202,7 @@ private struct OnboardingView: View {
                 .disableAutocorrection(true)
                 .padding()
                 .background(Color(.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .font(.title3)
 
             VStack(alignment: .leading, spacing: 8) {
@@ -201,19 +214,15 @@ private struct OnboardingView: View {
                 .pickerStyle(.segmented)
             }
 
-            Button {
-                onSave(id, role)
-            } label: {
-                Text("Continue")
-                    .font(.title3.weight(.semibold))
-                    .frame(maxWidth: .infinity).padding(.vertical, 6)
-            }
-            .buttonStyle(.borderedProminent).tint(.teal)
-            .disabled(id.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button { onSave(id, role) } label: { Text("Continue") }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(id.trimmingCharacters(in: .whitespaces).isEmpty)
+                .opacity(id.trimmingCharacters(in: .whitespaces).isEmpty ? 0.6 : 1)
 
             Spacer()
         }
         .padding(24)
+        .screenBackground()
     }
 }
 
@@ -372,6 +381,74 @@ private struct ResourcesView: View {
             failed = true
         }
         loading = false
+    }
+}
+
+// MARK: - Design system (shared)
+
+enum Theme {
+    static let teal = Color(red: 0.086, green: 0.478, blue: 0.435)        // #167A6E
+    static let tealLight = Color(red: 0.235, green: 0.769, blue: 0.698)   // #3CC4B2
+
+    static var screen: LinearGradient {
+        LinearGradient(colors: [tealLight.opacity(0.18), Color(.systemBackground)],
+                       startPoint: .top, endPoint: .center)
+    }
+    static let brand = LinearGradient(colors: [tealLight, teal],
+                                      startPoint: .topLeading, endPoint: .bottomTrailing)
+}
+
+extension View {
+    /// Soft elevated card surface.
+    func card() -> some View {
+        self.padding(16)
+            .frame(maxWidth: .infinity)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(color: .black.opacity(0.06), radius: 10, y: 4)
+    }
+    /// Full-screen brand-tinted background.
+    func screenBackground() -> some View {
+        self.background(Theme.screen.ignoresSafeArea())
+    }
+}
+
+/// Prominent gradient pill button.
+struct PrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(.title3, design: .rounded).weight(.semibold))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(Theme.brand)
+            .foregroundStyle(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(color: Theme.teal.opacity(0.35), radius: 8, y: 4)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+    }
+}
+
+/// A home-screen action tile (icon + label) used for navigation.
+private struct ActionTile: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.title2)
+                .foregroundStyle(Theme.teal)
+                .frame(width: 44, height: 44)
+                .background(Theme.tealLight.opacity(0.18))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            Text(title)
+                .font(.system(.headline, design: .rounded))
+                .foregroundStyle(.primary)
+            Spacer()
+            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+        }
+        .card()
     }
 }
 

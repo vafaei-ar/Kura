@@ -258,12 +258,17 @@ private struct ConsentView: View {
     let onDecline: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 22) {
             Spacer()
             Image(systemName: "heart.text.square.fill")
-                .font(.system(size: 64)).foregroundStyle(.teal)
+                .font(.system(size: 44, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 96, height: 96)
+                .background(Theme.brand)
+                .clipShape(Circle())
+                .shadow(color: Theme.teal.opacity(0.35), radius: 14, y: 7)
             Text("Voice check-in")
-                .font(.largeTitle.weight(.bold))
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
             Text("Your care team would like to ask how you're doing. We'll ask a few short questions out loud. Your answers are shared with your care team.")
                 .font(.title3)
                 .multilineTextAlignment(.center)
@@ -273,18 +278,15 @@ private struct ConsentView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             Spacer()
-            Button(action: onStart) {
-                Text("Start check-in")
-                    .font(.title3.weight(.semibold))
-                    .frame(maxWidth: .infinity).padding(.vertical, 8)
-            }
-            .buttonStyle(.borderedProminent).tint(.teal)
+            Button(action: onStart) { Text("Start check-in") }
+                .buttonStyle(PrimaryButtonStyle())
 
             Button(action: onDecline) {
-                Text("Not now").font(.title3).frame(maxWidth: .infinity)
+                Text("Not now").font(.system(.title3, design: .rounded)).frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.bordered).tint(.secondary)
         }
         .padding(24)
+        .screenBackground()
     }
 }
