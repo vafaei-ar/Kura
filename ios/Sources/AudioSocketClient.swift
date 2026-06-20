@@ -179,6 +179,17 @@ final class AudioSocketClient: NSObject, ObservableObject {
         }
     }
 
+    /// Send a typed answer (accessibility: for users who can't speak reliably —
+    /// slurred speech / aphasia is itself a stroke symptom). Stops listening,
+    /// sends it as the user's turn, and waits for VERA's reply.
+    func sendTyped(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        stopListening()
+        sendTextInput(trimmed)
+        setState(.speaking)
+    }
+
     private func sendTextInput(_ text: String) {
         DispatchQueue.main.async { self.transcript.append(Turn(speaker: .user, text: text)) }
         let payload: [String: Any] = ["type": "text_input", "text": text]

@@ -11,9 +11,8 @@ enum Config {
     static let pushEnabled = false
 
     /// Base URL of the Kura push-service (device registration + provider trigger).
-    /// Set to your Mac's LAN IP so the phone can reach it. "localhost" only
-    /// works in the Simulator.
-    static let pushServiceBaseURL = URL(string: "http://10.0.0.207:8000")!
+    /// Deployed on Azure (free tier) — reachable from anywhere, no Mac needed.
+    static let pushServiceBaseURL = URL(string: "https://kura-push.azurewebsites.net")!
 
     /// Base URL of VERA-cloud (the voice engine). The app opens
     /// `wss://<host>/ws/audio/<session_id>` against this host. Points at the

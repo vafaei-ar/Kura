@@ -86,6 +86,19 @@ def test_device_token_not_leaked():
     assert "push_token" not in r.json()
 
 
+def test_history_and_summary_not_ready():
+    client = fresh_client()
+    client.post("/v1/devices/register", json={"user_id": "p8", "push_token": "tok8888888"})
+    start = client.post("/v1/checkins/start", json={"user_id": "p8", "scenario": "micro_routine"})
+    sid = start.json()["session_id"]
+    # history lists the started check-in
+    hist = client.get("/v1/checkins").json()
+    assert any(h["session_id"] == sid and h["scenario"] == "micro_routine" for h in hist)
+    # summary not ready (VERA not configured in tests)
+    summ = client.get(f"/v1/checkins/{sid}/summary").json()
+    assert summ["ready"] is False
+
+
 def test_poll_pending_returns_then_clears():
     client = fresh_client()
     client.post("/v1/devices/register", json={"user_id": "p7", "push_token": "tok7777777"})

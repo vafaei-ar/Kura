@@ -58,3 +58,20 @@ class VeraClient:
         if not session_id:
             raise RuntimeError(f"VERA /session/start returned no session_id: {data}")
         return session_id
+
+    async def clinician_summary(self, session_id: str) -> dict | None:
+        """Fetch VERA's clinician summary (flags/tiers) for a finished check-in.
+
+        Returns None if VERA isn't configured or has no outcome yet.
+        """
+        if not self.configured:
+            return None
+        url = self._s.vera_api_base.rstrip("/") + f"/api/session/{session_id}/clinician-summary"
+        headers = {}
+        if self._s.vera_api_key:
+            headers["Authorization"] = f"Bearer {self._s.vera_api_key}"
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                return None
+            return resp.json()

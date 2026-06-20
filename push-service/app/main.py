@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Set
 
 from fastapi import (
@@ -100,6 +101,11 @@ notify_manager = NotifyManager()
 # hosts without WebSockets, e.g. Azure free tier). start_checkin queues here; the
 # app polls /v1/checkins/pending/{user_id}, which returns and clears the invite.
 _pending: Dict[str, dict] = {}
+
+# Recent check-ins the provider started (most-recent-last), so the console can
+# show a history and fetch each one's clinician summary. In-memory, capped.
+_history: list[dict] = []
+_HISTORY_MAX = 100
 
 
 def require_provider(
@@ -214,6 +220,16 @@ async def start_checkin(
     # ...and also push to any live WebSocket (instant path, when available).
     live_delivered = await notify_manager.deliver(req.user_id, invite)
 
+    # Record in history so the console can show results later.
+    _history.append({
+        "session_id": session_id,
+        "user_id": req.user_id,
+        "scenario": req.scenario,
+        "role": req.role,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    })
+    del _history[:-_HISTORY_MAX]
+
     return StartCheckinResponse(
         session_id=session_id,
         user_id=req.user_id,
@@ -222,6 +238,29 @@ async def start_checkin(
         live_delivered=live_delivered,
         detail=f"{result.detail}; live_delivered={live_delivered}",
     )
+
+
+@app.get("/v1/checkins")
+def list_checkins(_: None = Depends(require_provider)) -> list[dict]:
+    """Recent check-ins the provider started (most recent first)."""
+    return list(reversed(_history))
+
+
+@app.get("/v1/checkins/{session_id}/summary")
+async def checkin_summary(
+    session_id: str,
+    settings: Settings = Depends(get_settings),
+    _: None = Depends(require_provider),
+) -> dict:
+    """Clinician summary (flags + tiers) for a check-in, proxied from VERA.
+
+    Returns {"ready": false} until VERA has an outcome for the session.
+    """
+    vera = VeraClient(settings)
+    summary = await vera.clinician_summary(session_id)
+    if summary is None:
+        return {"ready": False, "session_id": session_id}
+    return {"ready": True, "summary": summary}
 
 
 @app.get("/v1/checkins/pending/{user_id}")

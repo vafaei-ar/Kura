@@ -9,6 +9,7 @@ struct CheckInView: View {
     @StateObject private var audio = AudioSocketClient()
     @State private var consented = false
     @State private var pulsing = false
+    @State private var typed = ""
 
     var body: some View {
         Group {
@@ -62,6 +63,22 @@ struct CheckInView: View {
                     Text("“\(audio.partialUserText)”")
                         .font(.title3).italic().foregroundStyle(.teal)
                         .multilineTextAlignment(.center)
+                }
+            }
+
+            // Type-to-answer (accessibility: for speech difficulty / aphasia).
+            if audio.state != .ended {
+                HStack(spacing: 8) {
+                    TextField("Or type your answer", text: $typed)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.title3)
+                        .submitLabel(.send)
+                        .onSubmit(sendTyped)
+                    Button(action: sendTyped) {
+                        Image(systemName: "paperplane.fill").font(.title3)
+                    }
+                    .buttonStyle(.borderedProminent).tint(.teal)
+                    .disabled(typed.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
 
@@ -133,6 +150,11 @@ struct CheckInView: View {
         .background(Color.red)
         .foregroundStyle(.white)
         .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func sendTyped() {
+        audio.sendTyped(typed)
+        typed = ""
     }
 
     private var micSymbol: String {
