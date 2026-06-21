@@ -10,9 +10,10 @@ enum Config {
     /// Push Notifications capability in Signing & Capabilities.
     static let pushEnabled = false
 
-    /// Ask-VERA patient Q&A. OFF by default and DRAFT pending clinician sign-off.
+    /// Ask-VERA patient Q&A. DRAFT pending clinician sign-off — keep OFF for any
+    /// real/patient build. Currently TRUE for developer testing only.
     /// Even when true, VERA must also have ASK_ENABLED set — double gate.
-    static let askVeraEnabled = false
+    static let askVeraEnabled = true
 
     /// Base URL of the Kura push-service (device registration + provider trigger).
     /// Deployed on Azure (free tier) — reachable from anywhere, no Mac needed.
