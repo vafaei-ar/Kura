@@ -63,27 +63,46 @@ This means the assistant can never "chat past" an emergency a patient describes.
 - Dosing, test interpretation, prognosis for *this* patient.
 - Anything non-medical/unsafe.
 
-## 5. How it's built (architecture)
+## 5. How it's built — RETRIEVAL-ONLY (decided)
 
-- **Brain = VERA.** A new VERA endpoint `POST /api/ask` owns flagging + retrieval
-  (RAG over the existing medical knowledge base via `azure_search` +
-  `generate_rag_response`) + the guardrail system prompt. All clinical content
-  stays in the reviewed repo.
-- **UI = Kura.** A chat screen in the app calls the push-service `/v1/ask`, which
-  proxies VERA `/api/ask`. No model or medical content in Kura.
-- **Double gate:** disabled by a VERA env flag (`ASK_ENABLED=false`) AND a Kura
-  build flag (`Config.askVeraEnabled=false`). Both must be on to reach a patient.
+**No generative model answers patients.** Decided: the assistant only returns
+**clinician-approved, curated answers**. There is no LLM writing replies, so it
+cannot invent or drift into advice.
 
-## 6. System prompt (DRAFT — for review)
+- **Brain = VERA.** `POST /api/ask` (gated by `ASK_ENABLED`):
+  1. **Flag first** — run `flagging.evaluate(question)`. Tier 1 → emergency
+     guidance; Tier 2 → urgent guidance. (Never answered conversationally.)
+  2. **Curated lookup** — deterministic match of the question against a
+     clinician-approved FAQ (`config/faq.yaml`: keyword triggers → approved
+     answer) and the resource directory. Returns the approved text verbatim.
+  3. **Refuse otherwise** — if no approved answer matches:
+     *"I'm sorry, I can only share a few approved topics. For anything else,
+     please contact your care team. If this is an emergency, call 911."*
+- **UI = Kura.** A chat screen calls push-service `/v1/ask` → VERA `/api/ask`.
+  No model or medical content in Kura.
+- **Double gate:** `ASK_ENABLED=false` (VERA) AND `Config.askVeraEnabled=false`
+  (app). Both must be flipped on to reach a patient.
 
-> You are an information assistant for stroke survivors and caregivers. Give
-> brief, plain-language, supportive information at a 6th–8th grade reading level.
-> You are NOT a doctor. Do NOT diagnose, do NOT give treatment or medication
-> advice, do NOT interpret the user's specific symptoms. For anything about the
-> user's own condition, advise contacting their care team, and call 911 for
-> emergencies. Only use the provided knowledge-base context; if you don't know,
-> say so and suggest contacting the care team. Always end with a one-line
-> reminder that this is general information, not medical advice.
+## 6. Content review
+
+The only patient-facing words come from `config/faq.yaml` (and the resource
+directory). That file is the **review surface** — Dr. Zand approves each Q→A
+entry and the refusal wording. No other text is generated.
+
+## 10. Empathy acknowledgments (optional, separate feature)
+
+A separate, opt-in behavior in the **structured check-in** (not Ask-VERA): when
+enabled, VERA may prepend **one short, non-medical** empathetic sentence before
+the next question if the patient expresses distress (e.g. patient says "I have
+pain" → *"I'm sorry to hear that."* → next question).
+
+Constraints:
+- **Templated, not generative** — drawn from a small clinician-approved phrase
+  list keyed to simple sentiment cues. No advice, no diagnosis, no medical content.
+- **Off by default** — per-session toggle (`empathy=true`), set by the clinician
+  in the console; defaults off.
+- Red-flag detection is unaffected (runs as normal on the patient's words).
+- DRAFT — the phrase list and trigger cues need clinical review.
 
 ## 7. Logging & audit (trial)
 

@@ -56,6 +56,15 @@ def test_register_then_start_checkin():
     assert body["session_id"]  # a stubbed UUID when VERA is not configured
 
 
+def test_ask_unavailable_without_vera():
+    client = fresh_client()
+    r = client.post("/v1/ask", json={"question": "what is a tia?"})
+    assert r.status_code == 200
+    assert r.json()["kind"] == "refusal"  # VERA not configured in tests
+    # empty question is handled
+    assert client.post("/v1/ask", json={"question": ""}).json()["kind"] == "refusal"
+
+
 def test_resources_unavailable_without_vera():
     client = fresh_client()
     r = client.get("/v1/resources?need=transportation")

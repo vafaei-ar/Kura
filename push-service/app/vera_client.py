@@ -110,3 +110,16 @@ class VeraClient:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url)
             return resp.json() if resp.status_code == 200 else None
+
+    async def ask(self, question: str) -> dict | None:
+        """Ask-VERA (retrieval-only). Returns VERA's answer/refusal/safety dict,
+        or None if VERA isn't configured or Ask-VERA is disabled there (403)."""
+        if not self.configured:
+            return None
+        url = self._s.vera_api_base.rstrip("/") + "/api/ask"
+        headers = {}
+        if self._s.vera_api_key:
+            headers["Authorization"] = f"Bearer {self._s.vera_api_key}"
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(url, json={"question": question}, headers=headers)
+            return resp.json() if resp.status_code == 200 else None

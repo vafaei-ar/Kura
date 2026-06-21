@@ -51,6 +51,16 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
 
+                // Ask-VERA is gated off until clinician sign-off (Config.askVeraEnabled).
+                if Config.askVeraEnabled {
+                    NavigationLink {
+                        AskView()
+                    } label: {
+                        ActionTile(title: "Ask VERA", systemImage: "bubble.left.and.bubble.right.fill")
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 #if DEBUG
                 devTools
                 #endif
@@ -436,6 +446,109 @@ private struct ResourcesView: View {
             failed = true
         }
         loading = false
+    }
+}
+
+// MARK: - Ask VERA (retrieval-only Q&A; gated by Config.askVeraEnabled)
+
+private struct AskView: View {
+    private struct Msg: Identifiable { let id = UUID(); let mine: Bool; let text: String; let emergency: Bool }
+    @State private var messages: [Msg] = [
+        Msg(mine: false,
+            text: "Hi! I can share a few general topics — like stroke warning signs, fatigue, driving, rehab, and getting to appointments. What would you like to know?",
+            emergency: false)
+    ]
+    @State private var input = ""
+    @State private var sending = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Information only — not medical advice. For emergencies, call 911.")
+                .font(.footnote).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(8).frame(maxWidth: .infinity)
+                .background(Color(.secondarySystemBackground))
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(messages) { m in bubble(m).id(m.id) }
+                        if sending { ProgressView().padding(.leading, 8) }
+                    }
+                    .padding()
+                }
+                .onChange(of: messages.count) { _ in
+                    if let last = messages.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("Ask a question…", text: $input)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focused)
+                    .submitLabel(.send)
+                    .onSubmit(send)
+                Button(action: send) { Image(systemName: "paperplane.fill").font(.title3) }
+                    .buttonStyle(.borderedProminent).tint(Theme.teal)
+                    .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty || sending)
+            }
+            .padding()
+        }
+        .navigationTitle("Ask VERA")
+        .navigationBarTitleDisplayMode(.inline)
+        .background(Theme.screen.ignoresSafeArea())
+    }
+
+    private func bubble(_ m: Msg) -> some View {
+        HStack {
+            if m.mine { Spacer(minLength: 40) }
+            Text(m.text)
+                .font(.body)
+                .padding(12)
+                .background(m.emergency ? Color.red
+                            : (m.mine ? Theme.teal.opacity(0.15) : Color(.secondarySystemBackground)))
+                .foregroundStyle(m.emergency ? .white : .primary)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            if !m.mine { Spacer(minLength: 40) }
+        }
+    }
+
+    private func send() {
+        let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        messages.append(Msg(mine: true, text: q, emergency: false))
+        input = ""; focused = false; sending = true
+
+        Task {
+            let reply = await fetchAnswer(q)
+            await MainActor.run {
+                messages.append(reply)
+                sending = false
+            }
+        }
+    }
+
+    private func fetchAnswer(_ q: String) async -> Msg {
+        let url = Config.pushServiceBaseURL.appendingPathComponent("/v1/ask")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["question": q])
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return Msg(mine: false, text: "Sorry, something went wrong.", emergency: false)
+            }
+            let kind = obj["kind"] as? String ?? ""
+            var text = obj["answer"] as? String ?? "Sorry, I don't have an answer for that."
+            if kind == "answer", let d = obj["disclaimer"] as? String, !d.isEmpty {
+                text += "\n\n\(d)"
+            }
+            return Msg(mine: false, text: text, emergency: kind == "emergency")
+        } catch {
+            return Msg(mine: false, text: "Couldn't reach the server. Please try again.", emergency: false)
+        }
     }
 }
 

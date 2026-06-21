@@ -357,6 +357,22 @@ async def resource_regions(settings: Settings = Depends(get_settings)) -> dict:
     return data or {"regions": [], "needs": ["transportation", "meals", "rehab", "devices", "support"]}
 
 
+@app.post("/v1/ask")
+async def ask(body: dict, settings: Settings = Depends(get_settings)) -> dict:
+    """Proxy to VERA's retrieval-only Ask-VERA. If VERA has it disabled (or no
+    VERA), returns a graceful 'unavailable' message. The app also gates this
+    behind Config.askVeraEnabled, so it ships off at multiple points."""
+    question = str(body.get("question", "")).strip()
+    if not question:
+        return {"kind": "refusal", "answer": "Please type a question."}
+    data = await VeraClient(settings).ask(question)
+    return data or {
+        "kind": "refusal",
+        "answer": "This isn't available right now. For any health concern, contact "
+                  "your care team. If this is an emergency, call 911.",
+    }
+
+
 @app.get("/v1/checkins/pending/{user_id}")
 def poll_pending(user_id: str) -> dict:
     """The app polls this every few seconds. Returns the queued check-in invite
