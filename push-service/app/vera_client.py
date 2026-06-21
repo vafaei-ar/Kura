@@ -30,6 +30,7 @@ class VeraClient:
         patient_name: str,
         honorific: str,
         role: str = "survivor",
+        empathy: bool = False,
     ) -> str:
         """Return a session_id for a new check-in."""
         if not self.configured:
@@ -49,6 +50,7 @@ class VeraClient:
             "patient_id": user_id,
             "honorific": honorific,
             "scenario": scenario,
+            "empathy": empathy,
         }
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(url, json=payload, headers=headers)

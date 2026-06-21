@@ -68,6 +68,9 @@ CONSOLE_HTML = """<!DOCTYPE html>
         <option value="rag_enhanced">General check-in (AI-enhanced)</option>
       </select>
     </label>
+    <label class="muted" title="Optional: VERA may add one short empathetic sentence before a question (DRAFT)">
+      <input type="checkbox" id="empathy"/> Empathetic
+    </label>
     <button class="ghost" onclick="loadAll()">Refresh</button>
   </div>
 
@@ -147,7 +150,7 @@ async function start(userId, btn){
   btn.disabled=true; btn.textContent="Starting…";
   try{
     const r = await fetch("/v1/checkins/start",{ method:"POST", headers:headers(),
-      body: JSON.stringify({ user_id:userId, scenario:$("scenario").value }) });
+      body: JSON.stringify({ user_id:userId, scenario:$("scenario").value, empathy:$("empathy").checked }) });
     const data = await r.json();
     if(!r.ok) throw new Error(data.detail || ("HTTP "+r.status));
     toast(data.live_delivered>0 ? `Delivered to ${userId}'s phone.` : `Created for ${userId} — app will pick it up when open.`);

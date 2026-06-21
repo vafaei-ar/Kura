@@ -48,6 +48,7 @@ class StartCheckinRequest(BaseModel):
     patient_name: str = ""
     honorific: str = ""
     role: str = "survivor"  # survivor | caregiver | clinician (VERA role track)
+    empathy: bool = False   # optional empathetic acknowledgments (DRAFT)
 
 
 class StartCheckinResponse(BaseModel):

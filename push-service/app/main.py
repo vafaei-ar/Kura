@@ -224,6 +224,7 @@ async def start_checkin(
             patient_name=req.patient_name,
             honorific=req.honorific,
             role=role,
+            empathy=req.empathy,
         )
     except Exception as exc:  # surface VERA failures clearly to the provider
         raise HTTPException(status_code=502, detail=f"VERA session start failed: {exc}")
