@@ -25,6 +25,8 @@ class DeviceRegistration(BaseModel):
     app_version: Optional[str] = None
     # Participant role, declared at registration: survivor | caregiver.
     role: str = "survivor"
+    # Friendly name the patient entered in the app; used for VERA's greeting.
+    display_name: str = ""
 
 
 class CompleteCheckinRequest(BaseModel):

@@ -14,6 +14,7 @@ actor DeviceRegistrationService {
             user_id: Config.userId,
             push_token: pushToken,
             role: Config.role,
+            display_name: Config.displayName,
             app_version: appVersion
         )
 

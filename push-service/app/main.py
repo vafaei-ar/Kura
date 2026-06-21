@@ -74,7 +74,8 @@ def get_db():
 def _device_dict(d: DeviceRow) -> dict:
     return {
         "user_id": d.user_id, "platform": d.platform, "token_type": d.token_type,
-        "role": d.role, "token_preview": d.push_token[:8] + "…", "app_version": d.app_version,
+        "role": d.role, "display_name": d.display_name,
+        "token_preview": d.push_token[:8] + "…", "app_version": d.app_version,
         "registered_at": d.registered_at, "updated_at": d.updated_at,
     }
 
@@ -174,6 +175,8 @@ def register_device(reg: DeviceRegistration, db: Session = Depends(get_db)) -> d
     row.platform = reg.platform
     row.token_type = reg.token_type
     row.role = reg.role
+    if reg.display_name:
+        row.display_name = reg.display_name
     row.app_version = reg.app_version
     row.updated_at = now
     db.commit()
@@ -221,7 +224,7 @@ async def start_checkin(
         session_id = await vera.start_session(
             user_id=req.user_id,
             scenario=req.scenario,
-            patient_name=req.patient_name,
+            patient_name=req.patient_name or device.display_name or "",
             honorific=req.honorific,
             role=role,
             empathy=req.empathy,

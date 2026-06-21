@@ -31,6 +31,7 @@ class Device(Base):
     platform: Mapped[str] = mapped_column(String(16), default="ios")
     token_type: Mapped[str] = mapped_column(String(16), default="alert")
     role: Mapped[str] = mapped_column(String(16), default="survivor")
+    display_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     app_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -92,6 +93,7 @@ def _ensure_columns(engine) -> None:
     # (table, column, DDL type with default)
     additions = [
         ("devices", "role", "VARCHAR(16) DEFAULT 'survivor'"),
+        ("devices", "display_name", "VARCHAR(128)"),
     ]
     insp = inspect(engine)
     tables = set(insp.get_table_names())

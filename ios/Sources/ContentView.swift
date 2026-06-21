@@ -451,13 +451,54 @@ private struct ResourcesView: View {
 
 // MARK: - Ask VERA (retrieval-only Q&A; gated by Config.askVeraEnabled)
 
+/// Persists the Ask-VERA conversation — across navigation AND app restarts
+/// (saved to a JSON file in the app's Documents directory, on the device).
+final class AskStore: ObservableObject {
+    static let shared = AskStore()
+
+    struct Msg: Identifiable, Codable {
+        let id: UUID
+        let mine: Bool
+        let text: String
+        let emergency: Bool
+        init(mine: Bool, text: String, emergency: Bool) {
+            id = UUID(); self.mine = mine; self.text = text; self.emergency = emergency
+        }
+    }
+
+    @Published var messages: [Msg] { didSet { save() } }
+
+    private static let welcome = Msg(
+        mine: false,
+        text: "Hi! I can share a few general topics — like stroke warning signs, fatigue, driving, rehab, and getting to appointments. What would you like to know?",
+        emergency: false)
+
+    private static var url: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("kura_ask.json")
+    }
+
+    private init() {
+        if let data = try? Data(contentsOf: Self.url),
+           let saved = try? JSONDecoder().decode([Msg].self, from: data), !saved.isEmpty {
+            messages = saved
+        } else {
+            messages = [Self.welcome]
+        }
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(messages) {
+            try? data.write(to: Self.url, options: .atomic)
+        }
+    }
+
+    /// Wipe the conversation back to just the welcome message.
+    func clear() { messages = [Self.welcome] }
+}
+
 private struct AskView: View {
-    private struct Msg: Identifiable { let id = UUID(); let mine: Bool; let text: String; let emergency: Bool }
-    @State private var messages: [Msg] = [
-        Msg(mine: false,
-            text: "Hi! I can share a few general topics — like stroke warning signs, fatigue, driving, rehab, and getting to appointments. What would you like to know?",
-            emergency: false)
-    ]
+    @ObservedObject private var store = AskStore.shared
     @State private var input = ""
     @State private var sending = false
     @FocusState private var focused: Bool
@@ -473,13 +514,13 @@ private struct AskView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        ForEach(messages) { m in bubble(m).id(m.id) }
+                        ForEach(store.messages) { m in bubble(m).id(m.id) }
                         if sending { ProgressView().padding(.leading, 8) }
                     }
                     .padding()
                 }
-                .onChange(of: messages.count) { _ in
-                    if let last = messages.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+                .onChange(of: store.messages.count) { _ in
+                    if let last = store.messages.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
                 }
             }
 
@@ -498,9 +539,15 @@ private struct AskView: View {
         .navigationTitle("Ask VERA")
         .navigationBarTitleDisplayMode(.inline)
         .background(Theme.screen.ignoresSafeArea())
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { store.clear() } label: { Image(systemName: "trash") }
+                    .disabled(store.messages.count <= 1)
+            }
+        }
     }
 
-    private func bubble(_ m: Msg) -> some View {
+    private func bubble(_ m: AskStore.Msg) -> some View {
         HStack {
             if m.mine { Spacer(minLength: 40) }
             Text(m.text)
@@ -517,19 +564,19 @@ private struct AskView: View {
     private func send() {
         let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
-        messages.append(Msg(mine: true, text: q, emergency: false))
+        store.messages.append(AskStore.Msg(mine: true, text: q, emergency: false))
         input = ""; focused = false; sending = true
 
         Task {
             let reply = await fetchAnswer(q)
             await MainActor.run {
-                messages.append(reply)
+                store.messages.append(reply)
                 sending = false
             }
         }
     }
 
-    private func fetchAnswer(_ q: String) async -> Msg {
+    private func fetchAnswer(_ q: String) async -> AskStore.Msg {
         let url = Config.pushServiceBaseURL.appendingPathComponent("/v1/ask")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -538,16 +585,16 @@ private struct AskView: View {
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
             guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return Msg(mine: false, text: "Sorry, something went wrong.", emergency: false)
+                return AskStore.Msg(mine: false, text: "Sorry, something went wrong.", emergency: false)
             }
             let kind = obj["kind"] as? String ?? ""
             var text = obj["answer"] as? String ?? "Sorry, I don't have an answer for that."
             if kind == "answer", let d = obj["disclaimer"] as? String, !d.isEmpty {
                 text += "\n\n\(d)"
             }
-            return Msg(mine: false, text: text, emergency: kind == "emergency")
+            return AskStore.Msg(mine: false, text: text, emergency: kind == "emergency")
         } catch {
-            return Msg(mine: false, text: "Couldn't reach the server. Please try again.", emergency: false)
+            return AskStore.Msg(mine: false, text: "Couldn't reach the server. Please try again.", emergency: false)
         }
     }
 }
