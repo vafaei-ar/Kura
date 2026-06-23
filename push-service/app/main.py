@@ -30,7 +30,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .console import CONSOLE_HTML
@@ -201,6 +201,23 @@ def get_device(user_id: str, db: Session = Depends(get_db)) -> dict:
     return _device_dict(row)
 
 
+@app.delete("/v1/devices/{user_id}")
+def delete_device(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_provider),
+) -> dict:
+    """Remove a patient (and their check-ins) from the dashboard."""
+    row = db.get(DeviceRow, user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no device registered for user_id")
+    db.execute(delete(CheckinRow).where(CheckinRow.user_id == user_id))
+    db.delete(row)
+    _pending.pop(user_id, None)
+    db.commit()
+    return {"deleted": user_id}
+
+
 @app.post("/v1/checkins/start", response_model=StartCheckinResponse)
 async def start_checkin(
     req: StartCheckinRequest,
@@ -278,6 +295,21 @@ def list_checkins(
     if user_id:
         stmt = stmt.where(CheckinRow.user_id == user_id)
     return [_checkin_dict(c) for c in db.execute(stmt).scalars().all()]
+
+
+@app.delete("/v1/checkins/{session_id}")
+def delete_checkin(
+    session_id: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_provider),
+) -> dict:
+    """Remove a single check-in record from the dashboard."""
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no check-in for session_id")
+    db.delete(row)
+    db.commit()
+    return {"deleted": session_id}
 
 
 async def _fetch_and_store_summary(

@@ -49,6 +49,9 @@ CONSOLE_HTML = """<!DOCTYPE html>
   .tier2 { border-left:4px solid var(--amber); }
   .tier3 { border-left:4px solid var(--teal); }
   .closeX { float:right; background:none; color:var(--muted); font-size:18px; padding:0 4px; }
+  button.del { background:none; color:var(--muted); font-size:16px; padding:6px 8px; line-height:1; }
+  button.del:hover { color:var(--red); }
+  td.actions { white-space:nowrap; text-align:right; }
 </style>
 </head>
 <body>
@@ -120,7 +123,8 @@ async function loadDevices(){
       <td><span class="pill">${x.role || 'survivor'}</span></td>
       <td><span class="pill">${x.platform}</span> <span class="muted">${x.token_preview}</span></td>
       <td class="muted">${new Date(x.registered_at).toLocaleString()}</td>
-      <td><button onclick="start('${x.user_id}',this)">Start check-in</button></td></tr>`).join("")
+      <td class="actions"><button onclick="start('${x.user_id}',this)">Start check-in</button>
+      <button class="del" title="Delete patient" onclick="deletePatient('${x.user_id}')">🗑</button></td></tr>`).join("")
       : '<tr><td colspan="5" class="empty">No registered patients yet.</td></tr>';
   }catch(e){ $("rows").innerHTML = '<tr><td colspan="4" class="empty">Could not load: '+e.message+'</td></tr>'; }
 }
@@ -141,9 +145,28 @@ async function loadHistory(){
       <td>${x.scenario} <span class="muted">· ${x.role}</span></td>
       <td class="muted">${new Date(x.started_at).toLocaleString()}</td>
       <td>${statusCell(x)}</td>
-      <td><button class="ghost" onclick="viewResult('${x.session_id}')">View result</button></td></tr>`).join("")
+      <td class="actions"><button class="ghost" onclick="viewResult('${x.session_id}')">View result</button>
+      <button class="del" title="Delete record" onclick="deleteCheckin('${x.session_id}')">🗑</button></td></tr>`).join("")
       : '<tr><td colspan="5" class="empty">None match.</td></tr>';
   }catch(e){ /* ignore */ }
+}
+
+async function deletePatient(userId){
+  if(!confirm(`Delete patient "${userId}" and all of their check-ins? This cannot be undone.`)) return;
+  try{
+    const r = await fetch(`/v1/devices/${encodeURIComponent(userId)}`, { method:"DELETE", headers: headers() });
+    if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.detail || ("HTTP "+r.status)); }
+    toast(`Deleted ${userId}.`); loadAll();
+  }catch(e){ toast("Failed: "+e.message); }
+}
+
+async function deleteCheckin(sessionId){
+  if(!confirm("Delete this check-in record? This cannot be undone.")) return;
+  try{
+    const r = await fetch(`/v1/checkins/${encodeURIComponent(sessionId)}`, { method:"DELETE", headers: headers() });
+    if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.detail || ("HTTP "+r.status)); }
+    toast("Record deleted."); loadHistory();
+  }catch(e){ toast("Failed: "+e.message); }
 }
 
 async function start(userId, btn){

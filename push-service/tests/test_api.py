@@ -176,6 +176,32 @@ def test_mock_audio_ws_conversation():
         assert msg["progress"] == 100
 
 
+def test_delete_checkin_removes_record():
+    client = fresh_client()
+    client.post("/v1/devices/register", json={"user_id": "pd1", "push_token": "tokdddddddd"})
+    sid = client.post("/v1/checkins/start", json={"user_id": "pd1"}).json()["session_id"]
+    assert any(h["session_id"] == sid for h in client.get("/v1/checkins").json())
+    d = client.delete(f"/v1/checkins/{sid}")
+    assert d.status_code == 200 and d.json()["deleted"] == sid
+    assert not any(h["session_id"] == sid for h in client.get("/v1/checkins").json())
+    # deleting again -> 404
+    assert client.delete(f"/v1/checkins/{sid}").status_code == 404
+
+
+def test_delete_patient_removes_device_and_checkins():
+    client = fresh_client()
+    client.post("/v1/devices/register", json={"user_id": "pd2", "push_token": "tokeeeeeeee"})
+    client.post("/v1/checkins/start", json={"user_id": "pd2"})
+    d = client.delete("/v1/devices/pd2")
+    assert d.status_code == 200 and d.json()["deleted"] == "pd2"
+    # device gone
+    assert client.get("/v1/devices/pd2").status_code == 404
+    # their check-ins gone too
+    assert not any(h["user_id"] == "pd2" for h in client.get("/v1/checkins").json())
+    # deleting again -> 404
+    assert client.delete("/v1/devices/pd2").status_code == 404
+
+
 def test_register_is_idempotent_upsert():
     client = fresh_client()
     a = client.post(
