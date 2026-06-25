@@ -428,12 +428,20 @@ private struct ResourcesView: View {
             }
             disclaimer = obj["disclaimer"] as? String ?? ""
             var cats: [ResCategory] = []
-            if let res = obj["resources"] as? [String: [[String: Any]]] {
-                for (name, list) in res where !list.isEmpty {
-                    let items = list.map { d in
-                        ResItem(
+            // Cast loosely, then narrow each level — JSONSerialization returns
+            // bridged NSArray/NSDictionary, so a deep generic cast like
+            // [String: [[String: Any]]] can fail and silently drop everything.
+            if let res = obj["resources"] as? [String: Any] {
+                for (name, value) in res {
+                    let list = (value as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+                    guard !list.isEmpty else { continue }
+                    let items = list.map { d -> ResItem in
+                        let detail = (d["description"] ?? d["notes"] ?? d["detail"]) as? String
+                        let contact = d["contact"] as? String
+                        let combined = [detail, contact].compactMap { $0 }.joined(separator: "\n")
+                        return ResItem(
                             title: (d["name"] ?? d["title"]) as? String ?? "Resource",
-                            detail: (d["description"] ?? d["notes"] ?? d["detail"]) as? String,
+                            detail: combined.isEmpty ? nil : combined,
                             phone: d["phone"] as? String,
                             url: (d["url"] ?? d["link"] ?? d["website"]) as? String
                         )

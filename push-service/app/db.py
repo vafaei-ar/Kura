@@ -37,6 +37,20 @@ class Device(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class Clinician(Base):
+    __tablename__ = "clinicians"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(128))
+    # physician | nurse | navigator (extensible)
+    role: Mapped[str] = mapped_column(String(32), default="navigator")
+    password_hash: Mapped[str] = mapped_column(String(256))
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Checkin(Base):
     __tablename__ = "checkins"
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -52,7 +66,9 @@ class Checkin(Base):
     summary_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # clinician workflow
     acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
 
 def _normalize_url(url: str) -> str:
@@ -94,6 +110,8 @@ def _ensure_columns(engine) -> None:
     additions = [
         ("devices", "role", "VARCHAR(16) DEFAULT 'survivor'"),
         ("devices", "display_name", "VARCHAR(128)"),
+        ("checkins", "acknowledged_by", "VARCHAR(128)"),
+        ("checkins", "resolved_by", "VARCHAR(128)"),
     ]
     insp = inspect(engine)
     tables = set(insp.get_table_names())

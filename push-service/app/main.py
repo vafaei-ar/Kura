@@ -21,11 +21,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Set
 
+import uuid
+
 from fastapi import (
+    Cookie,
     Depends,
     FastAPI,
     Header,
     HTTPException,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -35,16 +39,27 @@ from sqlalchemy.orm import Session
 
 from .console import CONSOLE_HTML
 
+from . import auth as auth_lib
 from .apns import APNsClient
 from .config import Settings, get_settings
-from .db import Checkin as CheckinRow, Device as DeviceRow, build_engine, make_session_factory
+from .db import (
+    Checkin as CheckinRow,
+    Clinician as ClinicianRow,
+    Device as DeviceRow,
+    build_engine,
+    make_session_factory,
+)
 from .models import (
+    ChangePasswordRequest,
     CompleteCheckinRequest,
     DeviceRegistration,
+    LoginRequest,
     StartCheckinRequest,
     StartCheckinResponse,
 )
 from .vera_client import VeraClient
+
+SESSION_COOKIE = "kura_session"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -85,6 +100,8 @@ def _checkin_dict(c: CheckinRow) -> dict:
         "session_id": c.session_id, "user_id": c.user_id, "scenario": c.scenario,
         "role": c.role, "started_at": c.started_at, "status": c.status,
         "has_priority": c.has_priority, "completed_at": c.completed_at,
+        "acknowledged_at": c.acknowledged_at, "acknowledged_by": c.acknowledged_by,
+        "resolved_at": c.resolved_at, "resolved_by": c.resolved_by,
     }
 
 
@@ -135,16 +152,43 @@ notify_manager = NotifyManager()
 _pending: Dict[str, dict] = {}
 
 
+def current_clinician(
+    kura_session: str | None = Cookie(default=None),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+) -> ClinicianRow | None:
+    """Resolve the logged-in clinician from the signed session cookie, or None."""
+    if not kura_session:
+        return None
+    cid = auth_lib.verify_token(kura_session, settings.signing_secret)
+    if not cid:
+        return None
+    row = db.get(ClinicianRow, cid)
+    if row is None or not row.is_active:
+        return None
+    return row
+
+
 def require_provider(
     x_provider_key: str | None = Header(default=None),
+    clinician: ClinicianRow | None = Depends(current_clinician),
     settings: Settings = Depends(get_settings),
-) -> None:
-    """Simple shared-secret gate for provider-facing endpoints."""
+) -> ClinicianRow | None:
+    """Gate for provider-facing endpoints.
+
+    Accepts EITHER a valid clinician session cookie (preferred) OR the legacy
+    shared X-Provider-Key (kept during the transition to per-clinician login).
+    Returns the acting clinician (or None when the legacy key/no-auth path is
+    used) so callers can attribute actions.
+    """
+    if clinician is not None:
+        return clinician
     expected = settings.provider_api_key
     if not expected:
-        return  # auth disabled (dev only)
-    if x_provider_key != expected:
-        raise HTTPException(status_code=401, detail="invalid or missing X-Provider-Key")
+        return None  # auth disabled (dev only)
+    if x_provider_key == expected:
+        return None  # authenticated via legacy shared key, no clinician identity
+    raise HTTPException(status_code=401, detail="login required")
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -162,6 +206,72 @@ def health(settings: Settings = Depends(get_settings)) -> dict:
         "vera_configured": bool(settings.vera_api_base),
         "apns_sandbox": settings.apns_use_sandbox,
     }
+
+
+# --- Clinician auth ------------------------------------------------------
+
+def _clinician_dict(c: ClinicianRow) -> dict:
+    return {
+        "id": c.id, "username": c.username, "display_name": c.display_name,
+        "role": c.role, "must_change_password": c.must_change_password,
+    }
+
+
+@app.post("/v1/auth/login")
+def login(
+    req: LoginRequest,
+    response: Response,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Clinician login. Verifies the password and sets a signed session cookie."""
+    username = (req.username or "").strip().lower()
+    row = db.execute(
+        select(ClinicianRow).where(ClinicianRow.username == username)
+    ).scalar_one_or_none()
+    # Always run a verify to keep timing similar whether or not the user exists.
+    stored = row.password_hash if row else "pbkdf2_sha256$200000$00$00"
+    if not auth_lib.verify_password(req.password, stored) or row is None or not row.is_active:
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    row.last_login_at = datetime.now(timezone.utc)
+    db.commit()
+    token = auth_lib.issue_token(row.id, settings.signing_secret, ttl_hours=settings.session_ttl_hours)
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, samesite="lax",
+        secure=not settings.dry_run, max_age=settings.session_ttl_hours * 3600, path="/",
+    )
+    return {"clinician": _clinician_dict(row)}
+
+
+@app.post("/v1/auth/logout")
+def logout(response: Response) -> dict:
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/v1/auth/me")
+def auth_me(clinician: ClinicianRow | None = Depends(current_clinician)) -> dict:
+    if clinician is None:
+        raise HTTPException(status_code=401, detail="not logged in")
+    return {"clinician": _clinician_dict(clinician)}
+
+
+@app.post("/v1/auth/change-password")
+def change_password(
+    req: ChangePasswordRequest,
+    clinician: ClinicianRow | None = Depends(current_clinician),
+    db: Session = Depends(get_db),
+) -> dict:
+    if clinician is None:
+        raise HTTPException(status_code=401, detail="not logged in")
+    if not auth_lib.verify_password(req.current_password, clinician.password_hash):
+        raise HTTPException(status_code=400, detail="current password is incorrect")
+    if len(req.new_password or "") < 8:
+        raise HTTPException(status_code=400, detail="new password must be at least 8 characters")
+    clinician.password_hash = auth_lib.hash_password(req.new_password)
+    clinician.must_change_password = False
+    db.commit()
+    return {"ok": True, "clinician": _clinician_dict(clinician)}
 
 
 @app.post("/v1/devices/register")
@@ -284,24 +394,70 @@ async def start_checkin(
 def list_checkins(
     db: Session = Depends(get_db),
     priority_only: bool = False,
+    unresolved_priority: bool = False,
     user_id: str | None = None,
-    _: None = Depends(require_provider),
+    _: ClinicianRow | None = Depends(require_provider),
 ) -> list[dict]:
     """Recent check-ins (most recent first), with optional filters for the
-    red-flag report: priority_only=true shows only flagged check-ins."""
+    red-flag report: priority_only shows only flagged check-ins;
+    unresolved_priority shows flagged check-ins not yet resolved (the worklist)."""
     stmt = select(CheckinRow).order_by(CheckinRow.started_at.desc()).limit(200)
-    if priority_only:
+    if priority_only or unresolved_priority:
         stmt = stmt.where(CheckinRow.has_priority.is_(True))
+    if unresolved_priority:
+        stmt = stmt.where(CheckinRow.resolved_at.is_(None))
     if user_id:
         stmt = stmt.where(CheckinRow.user_id == user_id)
     return [_checkin_dict(c) for c in db.execute(stmt).scalars().all()]
+
+
+@app.get("/v1/checkins/priority-count")
+def priority_count(
+    db: Session = Depends(get_db),
+    _: ClinicianRow | None = Depends(require_provider),
+) -> dict:
+    """Counts for the dashboard badge: open (unresolved) priority items + total."""
+    total_priority = db.execute(
+        select(CheckinRow).where(CheckinRow.has_priority.is_(True))
+    ).scalars().all()
+    open_priority = [c for c in total_priority if c.resolved_at is None]
+    return {"open_priority": len(open_priority), "total_priority": len(total_priority)}
+
+
+@app.get("/v1/patients/{user_id}")
+def patient_detail(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _: ClinicianRow | None = Depends(require_provider),
+) -> dict:
+    """Per-patient view: the device plus their check-in timeline and a small
+    flag-trend summary (most recent first)."""
+    device = db.get(DeviceRow, user_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="no device registered for user_id")
+    rows = db.execute(
+        select(CheckinRow).where(CheckinRow.user_id == user_id)
+        .order_by(CheckinRow.started_at.desc()).limit(200)
+    ).scalars().all()
+    checkins = [_checkin_dict(c) for c in rows]
+    priority = [c for c in checkins if c["has_priority"]]
+    return {
+        "patient": _device_dict(device),
+        "checkins": checkins,
+        "summary": {
+            "total": len(checkins),
+            "priority": len(priority),
+            "open_priority": len([c for c in priority if not c["resolved_at"]]),
+            "last_checkin_at": checkins[0]["started_at"] if checkins else None,
+        },
+    }
 
 
 @app.delete("/v1/checkins/{session_id}")
 def delete_checkin(
     session_id: str,
     db: Session = Depends(get_db),
-    _: None = Depends(require_provider),
+    _: ClinicianRow | None = Depends(require_provider),
 ) -> dict:
     """Remove a single check-in record from the dashboard."""
     row = db.get(CheckinRow, session_id)
@@ -310,6 +466,69 @@ def delete_checkin(
     db.delete(row)
     db.commit()
     return {"deleted": session_id}
+
+
+def _actor_label(clinician: ClinicianRow | None) -> str:
+    """Human label for who performed a triage action (for the audit trail)."""
+    if clinician is None:
+        return "provider (shared key)"
+    return f"{clinician.display_name} ({clinician.role})"
+
+
+@app.post("/v1/checkins/{session_id}/acknowledge")
+def acknowledge_checkin(
+    session_id: str,
+    db: Session = Depends(get_db),
+    clinician: ClinicianRow | None = Depends(require_provider),
+) -> dict:
+    """Mark a check-in as seen by a clinician (triage step 1)."""
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no check-in for session_id")
+    row.acknowledged_at = datetime.now(timezone.utc)
+    row.acknowledged_by = _actor_label(clinician)
+    db.commit()
+    return _checkin_dict(row)
+
+
+@app.post("/v1/checkins/{session_id}/resolve")
+def resolve_checkin(
+    session_id: str,
+    db: Session = Depends(get_db),
+    clinician: ClinicianRow | None = Depends(require_provider),
+) -> dict:
+    """Mark a check-in as resolved/followed-up (triage step 2). Acknowledges it
+    too if that hadn't happened yet, so resolve always implies seen."""
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no check-in for session_id")
+    now = datetime.now(timezone.utc)
+    label = _actor_label(clinician)
+    if row.acknowledged_at is None:
+        row.acknowledged_at = now
+        row.acknowledged_by = label
+    row.resolved_at = now
+    row.resolved_by = label
+    db.commit()
+    return _checkin_dict(row)
+
+
+@app.post("/v1/checkins/{session_id}/reopen")
+def reopen_checkin(
+    session_id: str,
+    db: Session = Depends(get_db),
+    _: ClinicianRow | None = Depends(require_provider),
+) -> dict:
+    """Undo resolve/acknowledge (e.g. clicked by mistake)."""
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no check-in for session_id")
+    row.acknowledged_at = None
+    row.acknowledged_by = None
+    row.resolved_at = None
+    row.resolved_by = None
+    db.commit()
+    return _checkin_dict(row)
 
 
 async def _fetch_and_store_summary(

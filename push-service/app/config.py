@@ -27,6 +27,15 @@ class Settings(BaseSettings):
 
     # Provider auth
     provider_api_key: str = ""
+    # Secret used to sign clinician session cookies. If empty, falls back to
+    # provider_api_key; set a long random value in production (SESSION_SECRET).
+    session_secret: str = ""
+    # Clinician session lifetime (hours).
+    session_ttl_hours: int = 12
+
+    @property
+    def signing_secret(self) -> str:
+        return self.session_secret or self.provider_api_key or "kura-dev-insecure-secret"
 
     @property
     def apns_host(self) -> str:

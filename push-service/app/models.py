@@ -53,6 +53,16 @@ class StartCheckinRequest(BaseModel):
     empathy: bool = False   # optional empathetic acknowledgments (DRAFT)
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class StartCheckinResponse(BaseModel):
     session_id: str
     user_id: str

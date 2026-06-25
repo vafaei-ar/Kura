@@ -13,9 +13,12 @@ assessment and flagging stay in the clinically-reviewed VERA-cloud.
 
 ## What works today (end-to-end, in the cloud)
 
-- **Provider console** (web): lists enrolled patients, starts a check-in
-  (choice of VERA scenario), shows **recent check-ins** with a **red-flag
-  filter** and a per-check-in **result view** (flags by tier).
+- **Provider console** (web): **per-clinician login** (admin-seeded accounts,
+  hashed passwords, signed sessions, roles), lists enrolled patients, starts a
+  check-in (choice of VERA scenario), shows **recent check-ins** with **red-flag
+  / open-priority filters**, a per-check-in **result view** (flags by tier),
+  **acknowledge / resolve triage** (with who-did-it audit trail and an open-flag
+  count badge), a **per-patient timeline**, and patient search.
 - **Patient app** (iOS): onboarding (name + participant ID + role), receives a
   check-in, **consent step**, then a **voice conversation** (on-device speech
   recognition + speech, or VERA's Azure neural voice), a **type-to-answer**
@@ -54,7 +57,10 @@ assessment and flagging stay in the clinically-reviewed VERA-cloud.
 - **Real push notifications + TestFlight**: needs the paid Apple Developer
   Program ($99/yr). Today the app delivers check-ins by polling while open, and
   runs on the developer's own device.
-- Provider **authentication** is a shared key (beta); not per-clinician SSO yet.
+- Provider **authentication** is now per-clinician username + password (admin
+  seeded via `python -m scripts.seed_clinician`); the legacy shared key still
+  works during transition. Institutional **SSO** (PSU Entra) is the next step
+  before real PHI — the session layer is built to swap to it.
 - Patient-record mapping (enrollment ID → clinical PATID) is manual for demos.
 
 ## How to demo
