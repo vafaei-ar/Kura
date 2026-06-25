@@ -104,9 +104,6 @@ CONSOLE_HTML = """<!DOCTYPE html>
     <label class="muted">Check-in
       <select id="scenario">
         <option value="guided">General check-in (guided)</option>
-        <option value="micro_routine">Routine check-in</option>
-        <option value="micro_worsening">Worsening check-in</option>
-        <option value="micro_redflag">Red-flag check-in (demo)</option>
         <option value="rag_enhanced">General check-in (AI-enhanced)</option>
       </select>
     </label>

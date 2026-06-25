@@ -18,7 +18,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle("Kura")
+            .navigationTitle("Stroke Check-in")
             .fullScreenCover(item: $state.activeSession) { invite in
                 CheckInView(invite: invite)
                     .environmentObject(state)

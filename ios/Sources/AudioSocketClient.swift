@@ -54,6 +54,18 @@ final class AudioSocketClient: NSObject, ObservableObject {
     private var silenceTimer: Timer?
     private var isListening = false
     private var conversationDone = false
+    /// How long the patient may pause (e.g. to think) before we treat their turn
+    /// as finished. Kept generous so a thoughtful pause isn't cut off mid-answer.
+    private let turnSilenceSeconds: TimeInterval = 3.0
+    /// Text carried across recognition segments within one turn. The recognizer
+    /// finalizes segments on its OWN (shorter) endpointing; we fold each finalized
+    /// segment in here and keep listening, so only `turnSilenceSeconds` of real
+    /// silence ends the turn — not the recognizer's internal pause detection.
+    private var accumulatedText = ""
+    /// Monotonic id of the current recognition segment. Late callbacks from a
+    /// cancelled/superseded segment carry an old id and are ignored (prevents a
+    /// cancel→error→restart loop).
+    private var segmentID = 0
 
     // MARK: - Lifecycle
 
@@ -241,13 +253,6 @@ final class AudioSocketClient: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.isListening, !self.conversationDone else { return }
 
-            self.recognitionTask?.cancel()
-            self.recognitionTask = nil
-
-            let req = SFSpeechAudioBufferRecognitionRequest()
-            req.shouldReportPartialResults = true
-            self.request = req
-
             let input = self.audioEngine.inputNode
             let format = input.outputFormat(forBus: 0)
             input.removeTap(onBus: 0)
@@ -261,18 +266,64 @@ final class AudioSocketClient: NSObject, ObservableObject {
             }
 
             self.isListening = true
+            self.accumulatedText = ""
             self.partialUserText = ""
             self.setState(.listening)
+            // Arm the silence timer up front so a turn with no speech still ends
+            // and re-listens, rather than hanging.
+            self.resetSilenceTimer()
+            self.startRecognitionSegment()
+        }
+    }
 
-            self.recognitionTask = self.recognizer?.recognitionTask(with: req) { [weak self] result, error in
-                guard let self else { return }
-                if let result {
-                    let t = result.bestTranscription.formattedString
-                    DispatchQueue.main.async { self.partialUserText = t }
-                    self.resetSilenceTimer()
-                    if result.isFinal { self.finishTurn() }
+    /// Join already-captured text with the live segment, trimming and spacing.
+    private func combine(_ a: String, _ b: String) -> String {
+        let left = a.trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = b.trimmingCharacters(in: .whitespacesAndNewlines)
+        if left.isEmpty { return right }
+        if right.isEmpty { return left }
+        return left + " " + right
+    }
+
+    /// Start (or restart) a single recognition segment over the already-running
+    /// audio engine. The recognizer may finalize a segment on its own short
+    /// endpointing; when it does we fold the text in and start a fresh segment,
+    /// so the patient can keep talking after a pause. Only the silence timer
+    /// (turnSilenceSeconds) actually ends the turn.
+    private func startRecognitionSegment() {
+        guard isListening, !conversationDone else { return }
+        recognitionTask?.cancel()
+        recognitionTask = nil
+
+        segmentID += 1
+        let myID = segmentID
+
+        let req = SFSpeechAudioBufferRecognitionRequest()
+        req.shouldReportPartialResults = true
+        request = req
+
+        recognitionTask = recognizer?.recognitionTask(with: req) { [weak self] result, error in
+            guard let self else { return }
+            // Ignore callbacks from a segment we've already moved past, and any
+            // that arrive after the turn ended.
+            guard myID == self.segmentID, self.isListening else { return }
+            if let result {
+                let seg = result.bestTranscription.formattedString
+                DispatchQueue.main.async { self.partialUserText = self.combine(self.accumulatedText, seg) }
+                self.resetSilenceTimer()
+                if result.isFinal {
+                    // Recognizer ended this segment on its own — keep the turn open.
+                    self.accumulatedText = self.combine(self.accumulatedText, seg)
+                    DispatchQueue.main.async {
+                        self.partialUserText = self.accumulatedText
+                        self.startRecognitionSegment()
+                    }
                 }
-                if error != nil { self.finishTurn() }
+            }
+            if error != nil {
+                // Transient recognizer error (often "no speech yet"). Don't end the
+                // turn — restart the segment; the silence timer decides when we're done.
+                DispatchQueue.main.async { self.startRecognitionSegment() }
             }
         }
     }
@@ -282,7 +333,7 @@ final class AudioSocketClient: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.silenceTimer?.invalidate()
-            self.silenceTimer = Timer.scheduledTimer(withTimeInterval: 1.4, repeats: false) { [weak self] _ in
+            self.silenceTimer = Timer.scheduledTimer(withTimeInterval: self.turnSilenceSeconds, repeats: false) { [weak self] _ in
                 self?.finishTurn()
             }
         }

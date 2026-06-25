@@ -33,15 +33,15 @@ targets:
     info:
       path: Resources/Info.plist
       properties:
-        CFBundleDisplayName: Kura
+        CFBundleDisplayName: Penn State Stroke Check-in
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        NSMicrophoneUsageDescription: "Kura uses the microphone so you can talk with your VERA care check-in."
-        NSSpeechRecognitionUsageDescription: "Kura transcribes your spoken answers on-device so your care check-in can respond."
-        NSLocalNetworkUsageDescription: "Kura connects to your care server on the local network to set up check-ins."
+        NSMicrophoneUsageDescription: "Penn State Stroke Check-in uses the microphone so you can talk with your care check-in."
+        NSSpeechRecognitionUsageDescription: "Penn State Stroke Check-in transcribes your spoken answers on-device so your care check-in can respond."
+        NSLocalNetworkUsageDescription: "Penn State Stroke Check-in connects to your care server on the local network to set up check-ins."
         # DEV ONLY: allow cleartext HTTP to the push-service LAN IP. Tighten before any real deployment.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
