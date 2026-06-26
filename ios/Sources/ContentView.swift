@@ -18,7 +18,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle("Stroke Check-in")
+            .navigationTitle("Lion AI Navigator")
             .fullScreenCover(item: $state.activeSession) { invite in
                 CheckInView(invite: invite)
                     .environmentObject(state)
@@ -70,8 +70,24 @@ struct ContentView: View {
         .screenBackground()
     }
 
+    /// Penn State institutional wordmark (Nittany Navy). Shown at the top of the
+    /// home screen so the app reads as a Penn State Health tool.
+    private var pennStateBadge: some View {
+        Text("PENN STATE HEALTH")
+            .font(.caption2.weight(.heavy))
+            .tracking(1.8)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(Color(red: 0.0, green: 0.118, blue: 0.267))   // Nittany Navy #001E44
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 1))
+    }
+
     private var header: some View {
         VStack(spacing: 10) {
+            pennStateBadge
+                .padding(.bottom, 2)
             Image(systemName: "waveform")
                 .font(.system(size: 34, weight: .semibold))
                 .foregroundStyle(.white)

@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Penn State Stroke Check-in</string>
+	<string>Lion AI</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -26,11 +26,11 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Penn State Stroke Check-in connects to your care server on the local network to set up check-ins.</string>
+	<string>Lion AI Navigator connects to your care server on the local network to set up check-ins.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Penn State Stroke Check-in uses the microphone so you can talk with your care check-in.</string>
+	<string>Lion AI Navigator uses the microphone so you can talk with your care check-in.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Penn State Stroke Check-in transcribes your spoken answers on-device so your care check-in can respond.</string>
+	<string>Lion AI Navigator transcribes your spoken answers on-device so your care check-in can respond.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
