@@ -12,15 +12,17 @@ CONSOLE_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>VERA · Provider Console</title>
+<title>Lion AI Navigator · Penn State Health</title>
 <style>
   :root { --teal:#167a6e; --teal-2:#3cc4b2; --ink:#16201e; --muted:#5b6b67;
-          --line:#e3eae8; --bg:#f6f9f8; --card:#ffffff; --red:#c0362c; --amber:#b8860b; }
+          --line:#e3eae8; --bg:#f6f9f8; --card:#ffffff; --red:#c0362c; --amber:#b8860b;
+          --navy:#001E44; --navy-2:#13294B; }
   * { box-sizing: border-box; }
   body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
          background:var(--bg); color:var(--ink); }
-  header { background:linear-gradient(180deg,var(--teal-2),var(--teal)); color:#fff; padding:18px 24px;
+  header { background:linear-gradient(165deg,var(--navy-2),var(--navy)); color:#fff; padding:18px 24px;
            display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  header .eyebrow { font-size:11px; font-weight:800; letter-spacing:2px; opacity:.85; margin:0 0 3px; }
   header h1 { margin:0; font-size:20px; font-weight:700; }
   header p { margin:4px 0 0; opacity:.9; font-size:13px; }
   .whoami { font-size:13px; text-align:right; }
@@ -78,8 +80,9 @@ CONSOLE_HTML = """<!DOCTYPE html>
 
 <!-- LOGIN -->
 <div id="login" class="hidden">
-  <h2>VERA · Provider Console</h2>
-  <p>Sign in with your clinician account.</p>
+  <p style="text-align:center;font-size:11px;font-weight:800;letter-spacing:2px;color:var(--navy);margin:0 0 6px;">PENN STATE HEALTH</p>
+  <h2>Lion AI Navigator</h2>
+  <p>Provider Console — sign in with your clinician account.</p>
   <input id="lg_user" placeholder="Username" autocomplete="username"/>
   <input id="lg_pass" type="password" placeholder="Password" autocomplete="current-password"
          onkeydown="if(event.key==='Enter')doLogin()"/>
@@ -91,7 +94,8 @@ CONSOLE_HTML = """<!DOCTYPE html>
 <div id="app" class="hidden">
 <header>
   <div>
-    <h1>VERA · Provider Console <span id="badge" class="badge zero">0</span></h1>
+    <p class="eyebrow">PENN STATE HEALTH</p>
+    <h1>Lion AI Navigator <span style="font-weight:400;opacity:.8">· Provider Console</span> <span id="badge" class="badge zero">0</span></h1>
     <p>Start a post-discharge voice check-in, review results, and triage flags.</p>
   </div>
   <div class="whoami">
