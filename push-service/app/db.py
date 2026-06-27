@@ -69,6 +69,17 @@ class Checkin(Base):
     acknowledged_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    # set once an emergency (Tier-1) alert email has been sent, to avoid resending
+    alerted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ClinicianNote(Base):
+    __tablename__ = "clinician_notes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    author: Mapped[str] = mapped_column(String(128))
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 def _normalize_url(url: str) -> str:
@@ -112,6 +123,7 @@ def _ensure_columns(engine) -> None:
         ("devices", "display_name", "VARCHAR(128)"),
         ("checkins", "acknowledged_by", "VARCHAR(128)"),
         ("checkins", "resolved_by", "VARCHAR(128)"),
+        ("checkins", "alerted_at", "TIMESTAMP"),
     ]
     insp = inspect(engine)
     tables = set(insp.get_table_names())

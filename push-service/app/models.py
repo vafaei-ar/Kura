@@ -58,6 +58,15 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class NoteRequest(BaseModel):
+    text: str
+
+
+class TriageActionRequest(BaseModel):
+    """Optional note attached when acknowledging/resolving a check-in."""
+    note: Optional[str] = None
+
+
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str

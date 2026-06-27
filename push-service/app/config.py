@@ -33,6 +33,27 @@ class Settings(BaseSettings):
     # Clinician session lifetime (hours).
     session_ttl_hours: int = 12
 
+    # Emergency (Tier-1) email alerts. All optional — if SMTP isn't configured the
+    # alert feature simply no-ops (logs only), so it's safe to ship dark and arm
+    # later via Azure app settings.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
+    alert_email_from: str = ""
+    alert_email_to: str = ""          # comma-separated recipients
+    # Public base URL of this console, used to deep-link from the alert email.
+    console_base_url: str = ""
+
+    @property
+    def alert_recipients(self) -> list[str]:
+        return [a.strip() for a in self.alert_email_to.split(",") if a.strip()]
+
+    @property
+    def email_alerts_configured(self) -> bool:
+        return bool(self.smtp_host and self.alert_email_from and self.alert_recipients)
+
     @property
     def signing_secret(self) -> str:
         return self.session_secret or self.provider_api_key or "kura-dev-insecure-secret"

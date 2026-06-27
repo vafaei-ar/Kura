@@ -40,11 +40,13 @@ from sqlalchemy.orm import Session
 from .console import CONSOLE_HTML
 
 from . import auth as auth_lib
+from . import notify_email
 from .apns import APNsClient
 from .config import Settings, get_settings
 from .db import (
     Checkin as CheckinRow,
     Clinician as ClinicianRow,
+    ClinicianNote as NoteRow,
     Device as DeviceRow,
     build_engine,
     make_session_factory,
@@ -54,8 +56,10 @@ from .models import (
     CompleteCheckinRequest,
     DeviceRegistration,
     LoginRequest,
+    NoteRequest,
     StartCheckinRequest,
     StartCheckinResponse,
+    TriageActionRequest,
 )
 from .vera_client import VeraClient
 
@@ -424,6 +428,50 @@ def priority_count(
     return {"open_priority": len(open_priority), "total_priority": len(total_priority)}
 
 
+@app.get("/v1/stats")
+def dashboard_stats(
+    db: Session = Depends(get_db),
+    _: ClinicianRow | None = Depends(require_provider),
+) -> dict:
+    """Top-of-console summary: patients, open priority, awaiting first check-in,
+    check-ins today, and median time-to-acknowledge for priority items (minutes)."""
+    devices = db.execute(select(DeviceRow)).scalars().all()
+    checkins = db.execute(select(CheckinRow)).scalars().all()
+
+    users_with_checkin = {c.user_id for c in checkins}
+    awaiting_first = sum(1 for d in devices if d.user_id not in users_with_checkin)
+
+    now = datetime.now(timezone.utc)
+    today = now.date()
+
+    def _aware(dt):
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    checkins_today = sum(1 for c in checkins if c.started_at and _aware(c.started_at).date() == today)
+
+    priority = [c for c in checkins if c.has_priority]
+    open_priority = [c for c in priority if c.resolved_at is None]
+
+    # median minutes from started -> acknowledged across acknowledged priority items
+    deltas = sorted(
+        (_aware(c.acknowledged_at) - _aware(c.started_at)).total_seconds() / 60.0
+        for c in priority if c.acknowledged_at and c.started_at
+    )
+    median_ack = None
+    if deltas:
+        m = len(deltas) // 2
+        median_ack = round(deltas[m] if len(deltas) % 2 else (deltas[m - 1] + deltas[m]) / 2, 1)
+
+    return {
+        "patients": len(devices),
+        "open_priority": len(open_priority),
+        "total_priority": len(priority),
+        "awaiting_first_checkin": awaiting_first,
+        "checkins_today": checkins_today,
+        "median_ack_minutes": median_ack,
+    }
+
+
 @app.get("/v1/patients/{user_id}")
 def patient_detail(
     user_id: str,
@@ -475,18 +523,35 @@ def _actor_label(clinician: ClinicianRow | None) -> str:
     return f"{clinician.display_name} ({clinician.role})"
 
 
+def _note_dict(n: NoteRow) -> dict:
+    return {"id": n.id, "session_id": n.session_id, "author": n.author,
+            "text": n.text, "created_at": n.created_at}
+
+
+def _add_note(db: Session, session_id: str, author: str, text: str) -> NoteRow:
+    note = NoteRow(id=str(uuid.uuid4()), session_id=session_id,
+                   author=author, text=text.strip(),
+                   created_at=datetime.now(timezone.utc))
+    db.add(note)
+    return note
+
+
 @app.post("/v1/checkins/{session_id}/acknowledge")
 def acknowledge_checkin(
     session_id: str,
+    body: TriageActionRequest | None = None,
     db: Session = Depends(get_db),
     clinician: ClinicianRow | None = Depends(require_provider),
 ) -> dict:
-    """Mark a check-in as seen by a clinician (triage step 1)."""
+    """Mark a check-in as seen by a clinician (triage step 1). Optional note."""
     row = db.get(CheckinRow, session_id)
     if row is None:
         raise HTTPException(status_code=404, detail="no check-in for session_id")
+    label = _actor_label(clinician)
     row.acknowledged_at = datetime.now(timezone.utc)
-    row.acknowledged_by = _actor_label(clinician)
+    row.acknowledged_by = label
+    if body and (body.note or "").strip():
+        _add_note(db, session_id, label, body.note)
     db.commit()
     return _checkin_dict(row)
 
@@ -494,11 +559,12 @@ def acknowledge_checkin(
 @app.post("/v1/checkins/{session_id}/resolve")
 def resolve_checkin(
     session_id: str,
+    body: TriageActionRequest | None = None,
     db: Session = Depends(get_db),
     clinician: ClinicianRow | None = Depends(require_provider),
 ) -> dict:
     """Mark a check-in as resolved/followed-up (triage step 2). Acknowledges it
-    too if that hadn't happened yet, so resolve always implies seen."""
+    too if that hadn't happened yet, so resolve always implies seen. Optional note."""
     row = db.get(CheckinRow, session_id)
     if row is None:
         raise HTTPException(status_code=404, detail="no check-in for session_id")
@@ -509,8 +575,39 @@ def resolve_checkin(
         row.acknowledged_by = label
     row.resolved_at = now
     row.resolved_by = label
+    if body and (body.note or "").strip():
+        _add_note(db, session_id, label, body.note)
     db.commit()
     return _checkin_dict(row)
+
+
+@app.get("/v1/checkins/{session_id}/notes")
+def list_notes(
+    session_id: str,
+    db: Session = Depends(get_db),
+    _: ClinicianRow | None = Depends(require_provider),
+) -> list[dict]:
+    rows = db.execute(
+        select(NoteRow).where(NoteRow.session_id == session_id)
+        .order_by(NoteRow.created_at.asc())
+    ).scalars().all()
+    return [_note_dict(n) for n in rows]
+
+
+@app.post("/v1/checkins/{session_id}/notes")
+def add_note(
+    session_id: str,
+    body: NoteRequest,
+    db: Session = Depends(get_db),
+    clinician: ClinicianRow | None = Depends(require_provider),
+) -> dict:
+    if not (body.text or "").strip():
+        raise HTTPException(status_code=400, detail="note text is required")
+    if db.get(CheckinRow, session_id) is None:
+        raise HTTPException(status_code=404, detail="no check-in for session_id")
+    note = _add_note(db, session_id, _actor_label(clinician), body.text)
+    db.commit()
+    return _note_dict(note)
 
 
 @app.post("/v1/checkins/{session_id}/reopen")
@@ -544,7 +641,32 @@ async def _fetch_and_store_summary(
         row.summary_json = json.dumps(summary)
         row.has_priority = bool(summary.get("has_priority"))
         db.commit()
+        _maybe_send_emergency_alert(row, summary, settings, db)
     return summary
+
+
+def _summary_min_tier(summary: dict) -> int:
+    """Lowest (most severe) tier across the summary's priority items. 3 if none."""
+    tiers = [
+        f.get("tier") for f in (summary.get("priority_items") or [])
+        if isinstance(f, dict) and isinstance(f.get("tier"), int)
+    ]
+    return min(tiers) if tiers else 3
+
+
+def _maybe_send_emergency_alert(row: CheckinRow, summary: dict,
+                                settings: Settings, db: Session) -> None:
+    """Email the on-call clinician on a Tier-1 (emergency) flag, exactly once.
+    Tier-2/urgent stay in the console worklist to avoid alert fatigue."""
+    if row.alerted_at is not None:
+        return
+    if _summary_min_tier(summary) != 1:
+        return
+    notify_email.send_alert(settings, row.user_id, row.session_id, tier=1)
+    # Mark as alerted regardless of send success, so a misconfigured SMTP doesn't
+    # retry on every poll; logs capture failures.
+    row.alerted_at = datetime.now(timezone.utc)
+    db.commit()
 
 
 @app.get("/v1/checkins/{session_id}/summary")

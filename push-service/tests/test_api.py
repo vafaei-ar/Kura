@@ -341,3 +341,86 @@ def test_patient_detail_timeline():
     assert d["summary"]["priority"] == 1 and d["summary"]["open_priority"] == 1
     # unknown patient -> 404
     assert client.get("/v1/patients/nobody").status_code == 404
+
+
+# --- Wave 1: notes, stats, email alerting -------------------------------
+
+def test_notes_add_list_and_on_acknowledge():
+    client, SL = _make_env()
+    seed_clinician(SL, username="jlee", password="goodpass1", name="Dr. Lee", role="physician")
+    client.post("/v1/auth/login", json={"username": "jlee", "password": "goodpass1"})
+    client.post("/v1/devices/register", json={"user_id": "pn1", "push_token": "toknnnnnnn"})
+    sid = client.post("/v1/checkins/start", json={"user_id": "pn1"}).json()["session_id"]
+    mark_priority(SL, sid)
+    # add a standalone note
+    n = client.post(f"/v1/checkins/{sid}/notes", json={"text": "called patient, advised ER"})
+    assert n.status_code == 200 and "Dr. Lee" in n.json()["author"]
+    # empty note rejected
+    assert client.post(f"/v1/checkins/{sid}/notes", json={"text": "   "}).status_code == 400
+    # acknowledge with an attached note
+    client.post(f"/v1/checkins/{sid}/acknowledge", json={"note": "spoke with caregiver"})
+    notes = client.get(f"/v1/checkins/{sid}/notes").json()
+    assert len(notes) == 2
+    assert [x["text"] for x in notes] == ["called patient, advised ER", "spoke with caregiver"]
+
+
+def test_stats_endpoint():
+    client, SL = _make_env()
+    seed_clinician(SL, username="jlee", password="goodpass1")
+    client.post("/v1/auth/login", json={"username": "jlee", "password": "goodpass1"})
+    client.post("/v1/devices/register", json={"user_id": "a", "push_token": "tokaaaaaaa"})
+    client.post("/v1/devices/register", json={"user_id": "b", "push_token": "tokbbbbbbb"})
+    sid = client.post("/v1/checkins/start", json={"user_id": "a"}).json()["session_id"]
+    mark_priority(SL, sid)
+    s = client.get("/v1/stats").json()
+    assert s["patients"] == 2
+    assert s["awaiting_first_checkin"] == 1   # b never checked in
+    assert s["total_priority"] == 1 and s["open_priority"] == 1
+
+
+def test_email_alert_unconfigured_is_noop():
+    from app import notify_email
+    from app.config import Settings
+    s = Settings(smtp_host="", alert_email_from="", alert_email_to="")
+    assert notify_email.send_alert(s, "p1", "s1", tier=1) is False
+    subj, body = notify_email.build_alert("p1", "s1", tier=1, console_base_url="https://x")
+    assert "EMERGENCY" in subj and "p1" in body and "/console" in body
+
+
+def test_emergency_alert_fires_once_tier1_only(monkeypatch):
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from app import main as m
+    from app.db import Checkin
+    from app.config import Settings
+
+    client, SL = _make_env()
+    db = SL()
+    db.add(Checkin(session_id="s1", user_id="p1", scenario="micro_redflag",
+                   started_at=datetime.now(timezone.utc), status="completed", has_priority=True))
+    db.commit()
+
+    calls = []
+    monkeypatch.setattr(m.notify_email, "send_alert",
+                        lambda *a, **k: (calls.append((a, k)), True)[1])
+    settings = Settings(vera_api_base="", provider_api_key="", dry_run=True)
+
+    # tier detection
+    assert m._summary_min_tier({"priority_items": [{"tier": 2}, {"tier": 1}]}) == 1
+    assert m._summary_min_tier({"priority_items": [{"tier": 2}]}) == 2
+
+    row = db.get(Checkin, "s1")
+    m._maybe_send_emergency_alert(row, {"priority_items": [{"tier": 1}]}, settings, db)
+    assert len(calls) == 1 and row.alerted_at is not None
+    # second call is a no-op (already alerted)
+    m._maybe_send_emergency_alert(row, {"priority_items": [{"tier": 1}]}, settings, db)
+    assert len(calls) == 1
+
+    # a tier-2-only check-in never alerts
+    db.add(Checkin(session_id="s2", user_id="p2", scenario="micro_worsening",
+                   started_at=datetime.now(timezone.utc), status="completed", has_priority=True))
+    db.commit()
+    row2 = db.get(Checkin, "s2")
+    m._maybe_send_emergency_alert(row2, {"priority_items": [{"tier": 2}]}, settings, db)
+    assert len(calls) == 1 and row2.alerted_at is None
+    db.close()

@@ -74,6 +74,19 @@ CONSOLE_HTML = """<!DOCTYPE html>
   .hidden { display:none !important; }
   .ack { color:#1f7a3f; }
   .seen { color:var(--amber); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:22px 0 6px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  .stat .n { font-size:24px; font-weight:700; color:var(--navy); }
+  .stat .n.warn { color:var(--red); }
+  .stat .l { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; margin-top:2px; }
+  .age { font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; display:inline-block; margin-top:3px;
+         background:#eef5f3; color:var(--muted); }
+  .age.warn { background:#fdf2e2; color:var(--amber); }
+  .age.crit { background:#fbeae8; color:var(--red); }
+  .notes { margin-top:6px; }
+  .note { background:#f4f8f7; border-radius:8px; padding:8px 10px; margin-bottom:6px; font-size:13px; }
+  .note .meta { color:var(--muted); font-size:11px; margin-top:2px; }
+  #modal textarea { width:100%; border:1px solid var(--line); border-radius:8px; padding:8px; font-size:13px; font-family:inherit; resize:vertical; }
 </style>
 </head>
 <body>
@@ -104,6 +117,8 @@ CONSOLE_HTML = """<!DOCTYPE html>
   </div>
 </header>
 <div class="wrap">
+  <div id="stats" class="stats"></div>
+
   <div class="bar">
     <label class="muted">Check-in
       <select id="scenario">
@@ -173,11 +188,13 @@ async function boot(){
   }catch(e){ showLogin(); }
 }
 
+let autoRefreshStarted = false;
 function onLoggedIn(c){
   showApp();
   $("who").textContent = c.display_name + " · " + c.role;
   if(c.must_change_password){ promptChangePassword(true); }
   loadAll();
+  if(!autoRefreshStarted){ startAutoRefresh(); autoRefreshStarted = true; }
 }
 
 async function doLogin(){
@@ -222,7 +239,7 @@ async function submitChangePassword(){
 }
 
 /* ---------- data ---------- */
-async function loadAll(){ await Promise.all([loadDevices(), loadHistory(), loadBadge()]); }
+async function loadAll(){ await Promise.all([loadStats(), loadDevices(), loadHistory(), loadBadge()]); }
 
 async function loadBadge(){
   try{
@@ -232,6 +249,45 @@ async function loadBadge(){
     b.classList.toggle("zero", d.open_priority === 0);
     b.title = d.open_priority + " open priority item(s); " + d.total_priority + " total flagged.";
   }catch(e){}
+}
+
+async function loadStats(){
+  try{
+    const r = await api("/v1/stats");
+    const s = await r.json();
+    const ack = s.median_ack_minutes == null ? "—"
+      : (s.median_ack_minutes < 60 ? Math.round(s.median_ack_minutes)+"m"
+         : (s.median_ack_minutes/60).toFixed(1)+"h");
+    const card = (n, label, warn) =>
+      `<div class="stat"><div class="n${warn?' warn':''}">${n}</div><div class="l">${label}</div></div>`;
+    $("stats").innerHTML =
+      card(s.patients, "Patients") +
+      card(s.open_priority, "Open priority", s.open_priority>0) +
+      card(s.awaiting_first_checkin, "Awaiting 1st check-in") +
+      card(s.checkins_today, "Check-ins today") +
+      card(ack, "Median time to ack");
+  }catch(e){}
+}
+
+/* Auto-refresh the lists every 25s, but never while a modal is open (so it
+   doesn't yank a result/notes view out from under the clinician). */
+function startAutoRefresh(){
+  setInterval(() => {
+    if($("overlay").classList.contains("show")) return;
+    if($("app").classList.contains("hidden")) return;
+    loadStats(); loadDevices(); loadHistory(); loadBadge();
+  }, 25000);
+}
+
+/* Aging pill for an unresolved priority item (how long it's been open). */
+function agePill(startedAt){
+  const mins = (Date.now() - new Date(startedAt).getTime()) / 60000;
+  let cls = "age", txt;
+  if(mins < 60) txt = Math.round(mins)+"m";
+  else if(mins < 1440) txt = (mins/60).toFixed(1)+"h";
+  else txt = Math.round(mins/1440)+"d";
+  if(mins >= 1440) cls += " crit"; else if(mins >= 240) cls += " warn";
+  return `<span class="${cls}" title="Open for this long">open ${txt}</span>`;
 }
 
 async function loadDevices(){
@@ -262,7 +318,7 @@ function renderDevices(){
 function triageCell(x){
   if(x.resolved_at) return `<span class="ack">✓ Resolved</span><div class="muted">${esc(x.resolved_by||"")} · ${fmt(x.resolved_at)}</div>`;
   if(x.has_priority === true){
-    let s = '<span style="color:var(--red);font-weight:600">⚠ Priority</span>';
+    let s = '<span style="color:var(--red);font-weight:600">⚠ Priority</span> ' + agePill(x.started_at);
     if(x.acknowledged_at) s += `<div class="muted seen">👁 ${esc(x.acknowledged_by||"")} · ${fmt(x.acknowledged_at)}</div>`;
     return s;
   }
@@ -303,12 +359,14 @@ async function loadHistory(){
 }
 
 /* ---------- actions ---------- */
-async function triage(sessionId, action){
+async function triage(sessionId, action, note){
   try{
-    const r = await api(`/v1/checkins/${encodeURIComponent(sessionId)}/${action}`, { method:"POST" });
+    const opts = { method:"POST" };
+    if(note){ opts.body = JSON.stringify({ note }); }
+    const r = await api(`/v1/checkins/${encodeURIComponent(sessionId)}/${action}`, opts);
     if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.detail || ("HTTP "+r.status)); }
     const labels = { acknowledge:"Acknowledged.", resolve:"Marked resolved.", reopen:"Reopened." };
-    toast(labels[action] || "Updated."); loadHistory(); loadBadge();
+    toast(labels[action] || "Updated."); loadStats(); loadHistory(); loadBadge();
   }catch(e){ toast("Failed: "+e.message); }
 }
 
@@ -353,15 +411,26 @@ function renderFlags(items){
   return items.map(f=>{ const t=(f && f.tier)||3; return `<div class="flag tier${t}"><strong>Tier ${t}</strong> — ${esc(flagText(f))}</div>`; }).join("");
 }
 
+function renderNotes(notes){
+  if(!notes || !notes.length) return '<p class="muted">No notes yet.</p>';
+  return '<div class="notes">' + notes.map(n =>
+    `<div class="note">${esc(n.text)}<div class="meta">${esc(n.author||"")} · ${fmt(n.created_at)}</div></div>`).join("") + '</div>';
+}
+
 async function viewResult(sessionId){
   $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button><p class="empty">Loading result…</p>';
   $("overlay").classList.add("show");
   try{
-    const r = await api(`/v1/checkins/${sessionId}/summary`);
+    const [r, nr] = await Promise.all([
+      api(`/v1/checkins/${sessionId}/summary`),
+      api(`/v1/checkins/${sessionId}/notes`),
+    ]);
     const data = await r.json();
+    const notes = nr.ok ? await nr.json() : [];
     if(!data.ready){
       $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button>'
-        + '<h2>No result yet</h2><p class="muted">The patient may not have finished the check-in, or VERA has not recorded an outcome yet. Try again shortly.</p>';
+        + '<h2>No result yet</h2><p class="muted">The patient may not have finished the check-in, or no outcome has been recorded yet. Try again shortly.</p>'
+        + '<h2>Notes</h2>' + renderNotes(notes) + noteEditor(sessionId, false);
       return;
     }
     const s = data.summary;
@@ -374,10 +443,37 @@ async function viewResult(sessionId){
       + (s.user_reported_urgency ? `<p><strong>Patient-reported urgency:</strong> ${esc(s.user_reported_urgency)}</p>` : '')
       + '<h2>Priority items</h2>' + renderFlags(s.priority_items)
       + '<h2>Routine items</h2>' + renderFlags(s.routine_items)
-      + (s.suggested_route ? `<p class="muted">Suggested routing (DRAFT): ${esc(typeof s.suggested_route==='string'?s.suggested_route:JSON.stringify(s.suggested_route))}</p>` : '');
+      + (s.suggested_route ? `<p class="muted">Suggested routing (DRAFT): ${esc(typeof s.suggested_route==='string'?s.suggested_route:JSON.stringify(s.suggested_route))}</p>` : '')
+      + '<h2>Notes</h2>' + renderNotes(notes) + noteEditor(sessionId, s.has_priority);
   }catch(e){
     $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button><p class="empty">Could not load: '+esc(e.message)+'</p>';
   }
+}
+
+function noteEditor(sessionId, isPriority){
+  let buttons = `<button class="sm" onclick="addNoteFromModal('${esc(sessionId)}')">Add note</button>`;
+  if(isPriority){
+    buttons += ` <button class="ghost sm" onclick="triageFromModal('${esc(sessionId)}','acknowledge')">Acknowledge + note</button>`
+             + ` <button class="sm" onclick="triageFromModal('${esc(sessionId)}','resolve')">Resolve + note</button>`;
+  }
+  return `<textarea id="noteText" rows="2" placeholder="Add a note (e.g. called patient, advised ER)…"></textarea>`
+       + `<div style="margin-top:8px">${buttons}</div>`;
+}
+
+async function addNoteFromModal(sessionId){
+  const text = ($("noteText").value||"").trim();
+  if(!text){ toast("Type a note first."); return; }
+  try{
+    const r = await api(`/v1/checkins/${encodeURIComponent(sessionId)}/notes`, { method:"POST", body: JSON.stringify({ text }) });
+    if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.detail || ("HTTP "+r.status)); }
+    toast("Note added."); viewResult(sessionId);
+  }catch(e){ toast("Failed: "+e.message); }
+}
+
+async function triageFromModal(sessionId, action){
+  const note = ($("noteText").value||"").trim();
+  await triage(sessionId, action, note || undefined);
+  viewResult(sessionId);
 }
 
 /* ---------- per-patient view ---------- */
