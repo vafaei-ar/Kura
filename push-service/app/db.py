@@ -73,6 +73,17 @@ class Checkin(Base):
     alerted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Setting(Base):
+    """Runtime config overrides edited from the admin page. Each row is one
+    non-secret setting (key -> string value); these overlay the env defaults at
+    runtime. Secrets (SMTP password) are NEVER stored here."""
+    __tablename__ = "settings"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+
 class ClinicianNote(Base):
     __tablename__ = "clinician_notes"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

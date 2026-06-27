@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     alert_email_from: str = ""
     alert_email_to: str = ""          # comma-separated recipients
+    # Master on/off for emergency email alerts (editable from the admin page).
+    alerts_enabled: bool = True
     # Public base URL of this console, used to deep-link from the alert email.
     console_base_url: str = ""
 

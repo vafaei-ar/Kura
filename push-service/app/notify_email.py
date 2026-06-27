@@ -41,14 +41,12 @@ def build_alert(user_id: str, session_id: str, *, tier: int,
     return subject, body
 
 
-def send_alert(settings: Settings, user_id: str, session_id: str, *, tier: int) -> bool:
-    """Send the alert email. Returns True if actually sent, False if skipped
-    (not configured) or on error. Never raises."""
+def _send(settings: Settings, subject: str, body: str) -> tuple[bool, str]:
+    """Low-level send. Returns (ok, detail). Never raises."""
+    if not settings.alerts_enabled:
+        return False, "alerts disabled"
     if not settings.email_alerts_configured:
-        logger.info("Email alert skipped (SMTP not configured) for %s tier %s", user_id, tier)
-        return False
-    subject, body = build_alert(user_id, session_id, tier=tier,
-                                console_base_url=settings.console_base_url)
+        return False, "SMTP not configured"
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.alert_email_from
@@ -61,9 +59,28 @@ def send_alert(settings: Settings, user_id: str, session_id: str, *, tier: int) 
             if settings.smtp_user:
                 smtp.login(settings.smtp_user, settings.smtp_password)
             smtp.send_message(msg)
-        logger.info("Sent Tier-%s alert email for %s to %s", tier, user_id,
-                    settings.alert_recipients)
-        return True
+        return True, f"sent to {', '.join(settings.alert_recipients)}"
     except Exception as exc:  # pragma: no cover - network/SMTP errors
-        logger.error("Failed to send alert email for %s: %s", user_id, exc)
-        return False
+        logger.error("Email send failed: %s", exc)
+        return False, f"send failed: {exc}"
+
+
+def send_alert(settings: Settings, user_id: str, session_id: str, *, tier: int) -> bool:
+    """Send an emergency alert email. Returns True if actually sent."""
+    subject, body = build_alert(user_id, session_id, tier=tier,
+                                console_base_url=settings.console_base_url)
+    ok, detail = _send(settings, subject, body)
+    logger.info("Tier-%s alert for %s: %s", tier, user_id, detail)
+    return ok
+
+
+def send_test(settings: Settings) -> tuple[bool, str]:
+    """Send a test alert so an admin can verify the email config. Returns
+    (ok, human-readable detail)."""
+    subject = "[Lion AI Navigator] Test alert"
+    body = (
+        "This is a test of the Lion AI Navigator emergency-alert email.\n\n"
+        "If you received this, alert delivery is configured correctly.\n\n"
+        "— Penn State Health · automated test, do not reply."
+    )
+    return _send(settings, subject, body)

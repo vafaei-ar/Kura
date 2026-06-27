@@ -424,3 +424,69 @@ def test_emergency_alert_fires_once_tier1_only(monkeypatch):
     m._maybe_send_emergency_alert(row2, {"priority_items": [{"tier": 2}]}, settings, db)
     assert len(calls) == 1 and row2.alerted_at is None
     db.close()
+
+
+# --- Admin settings page -------------------------------------------------
+
+def test_admin_settings_requires_admin_role():
+    client, SL = _make_env()
+    # a non-admin clinician is forbidden
+    seed_clinician(SL, username="nurse1", password="nursepass1", role="nurse")
+    client.post("/v1/auth/login", json={"username": "nurse1", "password": "nursepass1"})
+    assert client.get("/v1/admin/settings").status_code == 403
+    assert client.put("/v1/admin/settings", json={"alerts_enabled": False}).status_code == 403
+    # logged-out -> 403 too
+    client.post("/v1/auth/logout")
+    assert client.get("/v1/admin/settings").status_code == 403
+
+
+def test_admin_settings_get_update_and_no_secret_leak():
+    client, SL = _make_env()
+    seed_clinician(SL, username="boss", password="bosspass12", role="admin")
+    client.post("/v1/auth/login", json={"username": "boss", "password": "bosspass12"})
+    view = client.get("/v1/admin/settings").json()
+    assert "smtp_password" not in view              # secret never returned
+    assert view["smtp_password_configured"] is False
+    # update non-secret fields
+    r = client.put("/v1/admin/settings", json={
+        "alerts_enabled": True,
+        "alert_email_to": "oncall@example.org",
+        "smtp_host": "smtp.example.org",
+        "smtp_port": 2525,
+    })
+    assert r.status_code == 200
+    v2 = r.json()
+    assert v2["alert_email_to"] == "oncall@example.org"
+    assert v2["smtp_host"] == "smtp.example.org" and v2["smtp_port"] == 2525
+
+
+def test_admin_settings_override_env_via_effective():
+    from app import settings_store
+    from app.config import Settings
+    client, SL = _make_env()
+    seed_clinician(SL, username="boss", password="bosspass12", role="admin")
+    client.post("/v1/auth/login", json={"username": "boss", "password": "bosspass12"})
+    client.put("/v1/admin/settings", json={"alert_email_to": "db@example.org", "smtp_host": "db-host"})
+    # env says one thing; DB override should win in effective settings
+    env = Settings(smtp_host="env-host", alert_email_to="env@example.org", smtp_password="x",
+                   alert_email_from="from@example.org")
+    db = SL()
+    try:
+        eff = settings_store.effective_settings(db, env)
+        assert eff.smtp_host == "db-host"
+        assert eff.alert_recipients == ["db@example.org"]
+        # password is preserved from env (never overridden via DB)
+        assert eff.smtp_password == "x"
+    finally:
+        db.close()
+
+
+def test_admin_test_email_reports_unconfigured():
+    client, SL = _make_env()
+    seed_clinician(SL, username="boss", password="bosspass12", role="admin")
+    client.post("/v1/auth/login", json={"username": "boss", "password": "bosspass12"})
+    r = client.post("/v1/admin/test-email")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False  # SMTP not configured in tests
+    assert "configured" in body["detail"] or "disabled" in body["detail"]

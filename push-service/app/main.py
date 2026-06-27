@@ -41,6 +41,7 @@ from .console import CONSOLE_HTML
 
 from . import auth as auth_lib
 from . import notify_email
+from . import settings_store
 from .apns import APNsClient
 from .config import Settings, get_settings
 from .db import (
@@ -52,6 +53,7 @@ from .db import (
     make_session_factory,
 )
 from .models import (
+    AdminSettingsRequest,
     ChangePasswordRequest,
     CompleteCheckinRequest,
     DeviceRegistration,
@@ -276,6 +278,56 @@ def change_password(
     clinician.must_change_password = False
     db.commit()
     return {"ok": True, "clinician": _clinician_dict(clinician)}
+
+
+# --- Admin settings (admin role only) ------------------------------------
+
+def require_admin(
+    clinician: ClinicianRow | None = Depends(current_clinician),
+) -> ClinicianRow:
+    """Gate admin-only endpoints. Requires a logged-in clinician with role=admin
+    (the legacy shared-key path has no identity, so it can't reach admin)."""
+    if clinician is None or clinician.role != "admin":
+        raise HTTPException(status_code=403, detail="admin access required")
+    return clinician
+
+
+@app.get("/v1/admin/settings")
+def get_admin_settings(
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    _: ClinicianRow = Depends(require_admin),
+) -> dict:
+    """Current effective alert settings for the admin form. No secrets returned —
+    only whether the SMTP password is set in the environment."""
+    return settings_store.admin_view(db, settings)
+
+
+@app.put("/v1/admin/settings")
+def update_admin_settings(
+    req: AdminSettingsRequest,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    admin: ClinicianRow = Depends(require_admin),
+) -> dict:
+    """Update non-secret settings (only provided fields). Persists DB overrides
+    that overlay the env defaults at runtime."""
+    data = {k: v for k, v in req.model_dump(exclude_none=True).items()}
+    settings_store.set_overrides(db, data, updated_by=admin.username)
+    return settings_store.admin_view(db, settings)
+
+
+@app.post("/v1/admin/test-email")
+def admin_test_email(
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    _: ClinicianRow = Depends(require_admin),
+) -> dict:
+    """Send a test alert email using the effective settings, so the admin can
+    verify delivery without waiting for a real Tier-1 flag."""
+    eff = settings_store.effective_settings(db, settings)
+    ok, detail = notify_email.send_test(eff)
+    return {"ok": ok, "detail": detail}
 
 
 @app.post("/v1/devices/register")
@@ -662,7 +714,8 @@ def _maybe_send_emergency_alert(row: CheckinRow, summary: dict,
         return
     if _summary_min_tier(summary) != 1:
         return
-    notify_email.send_alert(settings, row.user_id, row.session_id, tier=1)
+    eff = settings_store.effective_settings(db, settings)
+    notify_email.send_alert(eff, row.user_id, row.session_id, tier=1)
     # Mark as alerted regardless of send success, so a misconfigured SMTP doesn't
     # retry on every poll; logs capture failures.
     row.alerted_at = datetime.now(timezone.utc)

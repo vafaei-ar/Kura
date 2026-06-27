@@ -113,6 +113,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
   </div>
   <div class="whoami">
     <span id="who"></span>
+    <button id="adminBtn" class="hidden" onclick="openAdmin()">Settings</button>
     <button onclick="doLogout()">Sign out</button>
   </div>
 </header>
@@ -192,6 +193,7 @@ let autoRefreshStarted = false;
 function onLoggedIn(c){
   showApp();
   $("who").textContent = c.display_name + " · " + c.role;
+  $("adminBtn").classList.toggle("hidden", c.role !== "admin");
   if(c.must_change_password){ promptChangePassword(true); }
   loadAll();
   if(!autoRefreshStarted){ startAutoRefresh(); autoRefreshStarted = true; }
@@ -500,6 +502,80 @@ async function viewPatient(userId){
   }catch(e){
     $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button><p class="empty">Could not load: '+esc(e.message)+'</p>';
   }
+}
+
+/* ---------- admin settings ---------- */
+function field(label, id, value, type){
+  const v = value == null ? "" : value;
+  if(type === "checkbox"){
+    return `<label style="display:flex;align-items:center;gap:8px;margin:8px 0;font-size:14px">
+      <input type="checkbox" id="${id}" ${v ? "checked" : ""}/> ${label}</label>`;
+  }
+  return `<label style="display:block;margin:10px 0 4px;font-size:13px;color:var(--muted)">${label}</label>
+    <input id="${id}" type="${type||'text'}" value="${esc(v)}"
+      style="width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;font-size:14px"/>`;
+}
+
+async function openAdmin(){
+  $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button><p class="empty">Loading settings…</p>';
+  $("overlay").classList.add("show");
+  try{
+    const r = await api("/v1/admin/settings");
+    const s = await r.json();
+    if(!r.ok) throw new Error(s.detail || ("HTTP "+r.status));
+    const pwState = s.smtp_password_configured
+      ? '<span class="ack">configured in server environment</span>'
+      : '<span style="color:var(--red)">not set — add SMTP_PASSWORD as an app setting</span>';
+    const ready = s.email_alerts_ready
+      ? '<div class="banner ok">✓ Email alerts are ready</div>'
+      : '<div class="banner priority">⚠ Email alerts not fully configured</div>';
+    $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button>'
+      + '<h2 style="margin-top:0;text-transform:none;letter-spacing:0;color:var(--ink);font-size:18px">Emergency alert settings</h2>'
+      + ready
+      + field("Email alerts enabled", "set_alerts_enabled", s.alerts_enabled, "checkbox")
+      + field("Recipients (comma-separated)", "set_alert_email_to", s.alert_email_to)
+      + field("From address", "set_alert_email_from", s.alert_email_from)
+      + field("SMTP host", "set_smtp_host", s.smtp_host)
+      + field("SMTP port", "set_smtp_port", s.smtp_port, "number")
+      + field("Use STARTTLS", "set_smtp_use_tls", s.smtp_use_tls, "checkbox")
+      + field("SMTP username", "set_smtp_user", s.smtp_user)
+      + field("Console URL (for email links)", "set_console_base_url", s.console_base_url)
+      + `<p class="muted" style="margin-top:10px">SMTP password: ${pwState}. For security it stays a server secret and isn't editable here.</p>`
+      + '<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">'
+      + '<button onclick="saveAdmin()">Save settings</button>'
+      + '<button class="ghost" onclick="testEmail(this)">Send test email</button>'
+      + '</div>';
+  }catch(e){
+    $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button><p class="empty">Could not load: '+esc(e.message)+'</p>';
+  }
+}
+
+async function saveAdmin(){
+  const body = {
+    alerts_enabled: $("set_alerts_enabled").checked,
+    alert_email_to: $("set_alert_email_to").value.trim(),
+    alert_email_from: $("set_alert_email_from").value.trim(),
+    smtp_host: $("set_smtp_host").value.trim(),
+    smtp_port: parseInt($("set_smtp_port").value || "587", 10),
+    smtp_use_tls: $("set_smtp_use_tls").checked,
+    smtp_user: $("set_smtp_user").value.trim(),
+    console_base_url: $("set_console_base_url").value.trim(),
+  };
+  try{
+    const r = await api("/v1/admin/settings", { method:"PUT", body: JSON.stringify(body) });
+    if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.detail || ("HTTP "+r.status)); }
+    toast("Settings saved."); openAdmin();
+  }catch(e){ toast("Failed: "+e.message); }
+}
+
+async function testEmail(btn){
+  btn.disabled = true; btn.textContent = "Sending…";
+  try{
+    const r = await api("/v1/admin/test-email", { method:"POST" });
+    const d = await r.json();
+    toast(d.ok ? ("Test email "+d.detail) : ("Not sent: "+d.detail));
+  }catch(e){ toast("Failed: "+e.message); }
+  finally{ btn.disabled = false; btn.textContent = "Send test email"; }
 }
 
 boot();

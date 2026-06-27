@@ -67,6 +67,20 @@ class TriageActionRequest(BaseModel):
     note: Optional[str] = None
 
 
+class AdminSettingsRequest(BaseModel):
+    """Non-secret runtime settings editable from the admin page. All optional;
+    only provided fields are updated. The SMTP password is intentionally absent —
+    it stays an environment secret."""
+    alerts_enabled: Optional[bool] = None
+    smtp_host: Optional[str] = None
+    smtp_port: Optional[int] = None
+    smtp_use_tls: Optional[bool] = None
+    smtp_user: Optional[str] = None
+    alert_email_from: Optional[str] = None
+    alert_email_to: Optional[str] = None
+    console_base_url: Optional[str] = None
+
+
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str

@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import auth as auth_lib  # noqa: E402
 from app.db import Clinician, build_engine, make_session_factory  # noqa: E402
 
-ROLES = {"physician", "nurse", "navigator"}
+ROLES = {"physician", "nurse", "navigator", "admin"}
 
 
 def main() -> int:
