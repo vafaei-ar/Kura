@@ -12,10 +12,15 @@ can host this on your own Azure account, separate from VERA.
 > The `/v1/notify` WebSocket and `/ws/audio` mock still exist for local dev, but
 > the deployed app uses polling and never needs them.
 
-## Setup (auto-deploy from GitHub) — one time
+## Setup (manual deployment from GitHub)
 
-CI/CD is wired in `.github/workflows/deploy-push-service.yml`: after setup,
-every push to `main` that touches `push-service/**` runs the tests and deploys.
+CI is in `.github/workflows/ci.yml`; pull requests and main/feature pushes run
+tests without deploying. `.github/workflows/deploy-push-service.yml` deploys only
+after an explicit manual request on main, exact SHA confirmation, and passing
+checks. See [the current release checklist](../docs/MANUAL_RELEASE.md).
+The hosting examples below are legacy setup notes, not sufficient release settings;
+use the current `.env.example` and engineering handoff for authenticated storage
+and paired-backend requirements.
 
 ### 1. Create the Web App (az CLI)
 
@@ -65,17 +70,14 @@ az webapp deployment list-publishing-profiles \
   entire contents of that `kura-push.publishsettings` file. **Delete the local
   file afterward** (it's a credential).
 - If you named the app something other than `kura-push`, edit
-  `AZURE_WEBAPP_NAME` at the top of `.github/workflows/deploy-push-service.yml`.
+  the deployment step's `app-name` in `.github/workflows/deploy-push-service.yml`.
 
 ### 3. Deploy
 
-```bash
-git add -A && git commit -m "Deploy push-service to Azure" && git push
-```
-
-Watch it in the repo's **Actions** tab. Your service lands at
-`https://kura-push.azurewebsites.net`. From then on, every `git push` that
-changes `push-service/**` redeploys automatically.
+Once both backends are ready and backed up, use Actions → Deploy Kura manually
+→ Run workflow. Select main, enter its full approved commit SHA and `DEPLOY KURA`.
+The workflow reruns backend/iOS checks before Azure deployment. A merge or push
+does not deploy. Do not run this merely to validate the workflow.
 
 ## After deploy
 

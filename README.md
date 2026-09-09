@@ -4,10 +4,11 @@
 **VERA-cloud / AI-SoNar** post-discharge stroke follow-up system.
 
 It lets a **provider trigger a voice check-in from a web console**, which then
-**rings/notifies the patient's iPhone**. When the patient accepts, the app runs
+**rings inside the open iPhone app**. Foreground polling is the current default;
+locked-screen/closed-app delivery is not enabled. When the patient accepts, the app runs
 the *existing* VERA-cloud voice check-in (Azure speech + dialog + BE-FAST
 flagging) over VERA-cloud's existing audio WebSocket. Kura adds **no clinical
-logic** — all assessment and escalation stays in the clinically-reviewed
+logic** — all assessment and escalation stays in the draft, not clinically validated,
 VERA-cloud repo.
 
 > Companion to [`vafaei-ar/VERA-cloud`](https://github.com/vafaei-ar/VERA-cloud).
@@ -33,6 +34,11 @@ Kura/
 
 ## Status
 
+The session 1/2 feedback implementation is on `feat/session-feedback-pipeline`.
+Start with [the engineering handoff](docs/FEEDBACK_IMPLEMENTATION.md) for current
+behavior, paired configuration, verification, and remaining pilot gates. The older
+scaffold/architecture descriptions below are historical context, not release readiness.
+
 Early scaffold for a **TestFlight beta** of the trial. The `push-service`
 runs and is testable today (with a dry-run push mode that needs no Apple
 certificates). The `ios/` app is a skeleton with clear `TODO` markers where
@@ -53,9 +59,9 @@ pytest
 
 ## Design decisions (see docs for rationale)
 
-- **Plain push notification** for the first beta (not CallKit ringing) — simpler
-  App Review, gentler framing for a non-emergency check-in. Upgrade path to
-  CallKit is isolated.
+- **Foreground polling and a bounded in-app ring** are the current delivery mode.
+  The home screen offers Test ring, an on/off setting, and Silence. Apple push
+  setup and CallKit are separate future work, not enabled by this feature.
 - **Reuse VERA-cloud `/ws/audio`** for the voice media — no new realtime infra.
 - **No clinical logic in Kura** — VERA-cloud stays the single source of truth.
 

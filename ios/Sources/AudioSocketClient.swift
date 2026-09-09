@@ -21,7 +21,7 @@ import Speech
 /// after speech ends the user's turn and sends the text.
 final class AudioSocketClient: NSObject, ObservableObject {
 
-    enum State: Equatable { case idle, connecting, speaking, listening, ended, error(String) }
+    enum State: Equatable { case idle, connecting, speaking, listening, reviewing, paused, ended, error(String) }
 
     struct Turn: Identifiable, Equatable {
         let id = UUID()
@@ -37,8 +37,37 @@ final class AudioSocketClient: NSObject, ObservableObject {
     @Published private(set) var transcript: [Turn] = []
     /// Set when VERA flags a red flag (BE-FAST). The UI must surface this prominently.
     @Published private(set) var emergencyText: String?
+    @Published private(set) var terminalState: String?
+    @Published var textOnly = CommunicationProfile.load().preferences.text_only
+    @Published var reviewBeforeSending = CommunicationProfile.load().preferences.review_before_sending
+    @Published private(set) var recordingWarning: String?
+    @Published private(set) var hasPendingAnswer = false
+    @Published private(set) var recoveryNotice: String?
+    private let participantId = Config.userId
+    static var recoveryServer: String { Config.pushServiceBaseURL.absoluteString + "|" + Config.veraBaseURL.absoluteString }
+    private let recoveryStore = PendingAnswerStore(userId: Config.userId, server: AudioSocketClient.recoveryServer)
+    private var pendingAnswer: PendingAnswer?
+    private var answerContext: String?
+    private var recoveryProtocol = false
+    private var retryAfterGreeting = false
+    private var receiptTimer: Timer?
+    private var connectionGeneration = UUID()
+    var canSendAnswer: Bool { !hasPendingAnswer && (state == .listening || state == .reviewing) }
+    var pendingAnswerText: String? { pendingAnswer?.text }
+    var recordOriginalAudio = false
+    private var answerConsentAccepted = false
+    private var originalPCM = Data()
+    private var originalSampleRate: UInt32 = 48000
+    private var recordingPartial = false
+    private let recordingLock = NSLock()
+    var speechRate: Float = Float(CommunicationProfile.load().preferences.speech_rate)
+    var manualFinish = CommunicationProfile.load().preferences.manual_finish
+    private var serverSpeechRate: Float = 0.85
+    private let savedSilenceSeconds = CommunicationProfile.load().preferences.silence_seconds
 
     private var task: URLSessionWebSocketTask?
+    private let audioOwner = UUID()
+    private var sessionToken: String?
     private let urlSession = URLSession(configuration: .default)
 
     // Playback
@@ -56,12 +85,15 @@ final class AudioSocketClient: NSObject, ObservableObject {
     private var conversationDone = false
     /// How long the patient may pause (e.g. to think) before we treat their turn
     /// as finished. Kept generous so a thoughtful pause isn't cut off mid-answer.
-    private let turnSilenceSeconds: TimeInterval = 3.0
+    private var turnSilenceSeconds: TimeInterval {
+        return TimeInterval(min(30, max(3, savedSilenceSeconds)))
+    }
     /// Text carried across recognition segments within one turn. The recognizer
     /// finalizes segments on its OWN (shorter) endpointing; we fold each finalized
     /// segment in here and keep listening, so only `turnSilenceSeconds` of real
     /// silence ends the turn — not the recognizer's internal pause detection.
     private var accumulatedText = ""
+    private var pausedDraft = ""
     /// Monotonic id of the current recognition segment. Late callbacks from a
     /// cancelled/superseded segment carry an old id and are ignored (prevents a
     /// cancel→error→restart loop).
@@ -69,19 +101,71 @@ final class AudioSocketClient: NSObject, ObservableObject {
 
     // MARK: - Lifecycle
 
-    func connect(sessionId: String) {
+    private var recordingSessionId: String?
+
+    func connect(sessionId: String, token: String? = nil) {
+        guard Config.userId == participantId else { return }
+        stopListening()
+        player?.stop(); synthesizer.stopSpeaking(at: .immediate)
+        receiptTimer?.invalidate()
+        connectionGeneration = UUID()
+        let generation = connectionGeneration
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        conversationDone = false
+        terminalState = nil
+        recordingSessionId = sessionId
+        sessionToken = token
+        answerContext = nil; recoveryProtocol = false; retryAfterGreeting = false
+        recordingLock.lock(); answerConsentAccepted = false; recordingLock.unlock()
         setState(.connecting)
-        requestPermissions { [weak self] granted in
-            guard let self else { return }
-            guard granted else {
-                self.setState(.error("Microphone or speech permission was denied"))
-                return
+        Task { @MainActor [weak self] in
+            guard let self, self.connectionGeneration == generation, Config.userId == self.participantId else { return }
+            do {
+                self.pendingAnswer = try self.recoveryStore.load(sessionId: sessionId)
+                self.hasPendingAnswer = self.pendingAnswer != nil
+                if let pending = self.pendingAnswer {
+                    self.recoveryNotice = "Checking whether your saved answer reached the server…"
+                    let receipt = try await CheckinService.answerReceipt(pending)
+                    guard self.connectionGeneration == generation, Config.userId == self.participantId else { return }
+                    if receipt.saved && receipt.status == "accepted" {
+                        try self.confirmPending(pending.messageId)
+                        self.recoveryNotice = "Your previous answer was saved. It was not sent again."
+                        if pending.expectsAudio { self.recordingWarning = "Text recovery does not confirm whether the optional recording was saved." }
+                        if ["completed", "declined", "withdrawn", "escalated"].contains(receipt.state) {
+                            self.terminalState = receipt.state
+                            self.conversationDone = true
+                            if receipt.state == "escalated" { self.emergencyText = receipt.message ?? "Please seek emergency help now. Call 911." }
+                            self.setState(.ended)
+                            return
+                        }
+                    } else if receipt.status == "missing" && receipt.can_retry {
+                        self.retryAfterGreeting = true
+                        self.recoveryNotice = "Your answer is saved on this phone. Retrying the same answer…"
+                        if pending.expectsAudio { self.recordingWarning = "The optional recording is not recovered after reopening. Your text answer will still be retried." }
+                    } else {
+                        self.setState(.error("This answer cannot safely be resent: the check-in may have changed, ended, or expired. The local copy is retained. Contact the study team if you need help."))
+                        return
+                    }
+                }
+                guard self.connectionGeneration == generation, Config.userId == self.participantId else { return }
+                if self.textOnly { self.openSocket(sessionId: sessionId); return }
+                self.requestPermissions { [weak self] granted in
+                    guard let self, self.connectionGeneration == generation, Config.userId == self.participantId else { return }
+                    if !granted { self.textOnly = true }
+                    self.openSocket(sessionId: sessionId)
+                }
+            } catch {
+                guard self.connectionGeneration == generation, Config.userId == self.participantId else { return }
+                self.setState(.error("Could not verify answer recovery. No saved answer was deleted or resent. Please reconnect when available."))
             }
-            self.openSocket(sessionId: sessionId)
         }
     }
 
     func disconnect() {
+        connectionGeneration = UUID()
+        receiptTimer?.invalidate()
+        if terminalState == nil { terminalState = "interrupted" }
         conversationDone = true
         stopListening()
         player?.stop()
@@ -104,6 +188,8 @@ final class AudioSocketClient: NSObject, ObservableObject {
     }
 
     private func configureAudioSession() {
+        // All socket/playback entry points run on the main thread.
+        MainActor.assumeIsolated { IncomingCheckinRinger.shared.beginAudio(owner: audioOwner) }
         let s = AVAudioSession.sharedInstance()
         try? s.setCategory(.playAndRecord, mode: .voiceChat,
                            options: [.duckOthers, .defaultToSpeaker, .allowBluetooth])
@@ -111,6 +197,7 @@ final class AudioSocketClient: NSObject, ObservableObject {
     }
 
     private func deactivateAudioSession() {
+        MainActor.assumeIsolated { IncomingCheckinRinger.shared.endAudio(owner: audioOwner) }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -119,7 +206,9 @@ final class AudioSocketClient: NSObject, ObservableObject {
     private func openSocket(sessionId: String) {
         configureAudioSession()
         let url = Config.audioSocketURL(sessionId: sessionId)
-        let t = urlSession.webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        if let sessionToken { request.setValue("Bearer " + sessionToken, forHTTPHeaderField: "Authorization") }
+        let t = urlSession.webSocketTask(with: request)
         task = t
         t.resume()
         setState(.speaking)   // VERA greets first
@@ -127,11 +216,18 @@ final class AudioSocketClient: NSObject, ObservableObject {
     }
 
     private func receive() {
-        task?.receive { [weak self] result in
-            guard let self else { return }
+        guard let receivingTask = task else { return }
+        receivingTask.receive { [weak self] result in
+          DispatchQueue.main.async {
+            guard let self, self.task === receivingTask, Config.userId == self.participantId else { return }
             switch result {
             case .failure(let error):
-                if !self.conversationDone { self.setState(.error(error.localizedDescription)) }
+                if !self.conversationDone {
+                    self.stopListening()
+                    self.player?.stop(); self.synthesizer.stopSpeaking(at: .immediate)
+                    self.resumeListeningAfterSpeech = false
+                    self.setState(.error(self.hasPendingAnswer ? "Answer confirmation was interrupted. Your local copy is retained; reconnect to check it." : error.localizedDescription))
+                }
             case .success(let message):
                 switch message {
                 case .string(let text): self.handleServerMessage(text)
@@ -141,6 +237,7 @@ final class AudioSocketClient: NSObject, ObservableObject {
                 }
                 self.receive()
             }
+          }
         }
     }
 
@@ -151,12 +248,44 @@ final class AudioSocketClient: NSObject, ObservableObject {
             let type = obj["type"] as? String
         else { return }
 
+        if let rate = obj["speech_rate"] as? Double, (0.5...1.5).contains(rate) { serverSpeechRate = Float(rate) }
+        if obj["consent"] as? String == "accepted" {
+            recordingLock.lock(); answerConsentAccepted = true; recordingLock.unlock()
+        }
+        if let context = obj["answer_context"] as? String { answerContext = context }
+        if obj["answer_recovery"] as? Int == 1 {
+            recoveryProtocol = true
+            if retryAfterGreeting, let pending = pendingAnswer {
+                retryAfterGreeting = false
+                guard answerContext == pending.expectedContext else {
+                    setState(.error("The question changed while reconnecting. Your answer remains on this phone; reconnect to check its status."))
+                    return
+                }
+                transmit(pending)
+                return // Do not speak/listen to a prompt the recovered answer addresses.
+            }
+        }
+        if retryAfterGreeting && (type == "greeting" || type == "audio") {
+            setState(.error("This server does not support safe answer recovery. Your local copy is retained; update both services before retrying."))
+            return
+        }
+        if ["answer_receipt", "response", "completion", "session_ended", "emergency_alert"].contains(type), obj["saved"] as? Bool == true,
+           let messageId = obj["message_id"] as? String, pendingAnswer?.messageId == messageId {
+            do { try confirmPending(messageId) }
+            catch { recoveryNotice = "The server confirmed your answer, but local cleanup failed. Reconnect before answering again." }
+        }
+
         if let p = obj["progress"] as? Double {
             let norm = p > 1 ? p / 100.0 : p
             DispatchQueue.main.async { self.progress = max(0, min(1, norm)) }
         }
-
         switch type {
+        case "answer_receipt":
+            break // A durable receipt is not the next question or proof of clinician review.
+        case "audio_receipt":
+            if obj["stored"] as? Bool == false {
+                DispatchQueue.main.async { self.recordingWarning = "The original recording was not saved. Your text answer can still be sent." }
+            }
         case "greeting", "audio", "response", "question", "completion":
             let botText = obj["text"] as? String ?? ""
             if !botText.isEmpty {
@@ -166,7 +295,10 @@ final class AudioSocketClient: NSObject, ObservableObject {
                 }
             }
             let isCompletion = (type == "completion")
-            if isCompletion { conversationDone = true }
+            if isCompletion {
+                conversationDone = true
+                DispatchQueue.main.async { self.terminalState = "completed" }
+            }
 
             if let b64 = obj["audio_data"] as? String, let audio = Data(base64Encoded: b64) {
                 playBotAudio(audio, thenListen: !isCompletion)
@@ -179,8 +311,19 @@ final class AudioSocketClient: NSObject, ObservableObject {
         case "emergency_alert":
             let m = obj["message"] as? String ?? "Please seek help now. If this is an emergency, call 911."
             DispatchQueue.main.async {
+                self.terminalState = "escalated"
                 self.emergencyText = m
                 self.transcript.append(Turn(speaker: .bot, text: "⚠️ " + m))
+                self.disconnect()
+                self.speak(m, thenListen: false)
+            }
+
+        case "session_ended":
+            let message = obj["text"] as? String ?? "This check-in has ended."
+            DispatchQueue.main.async {
+                self.terminalState = obj["state"] as? String ?? "interrupted"
+                self.transcript.append(Turn(speaker: .bot, text: message))
+                self.disconnect()
             }
 
         case "error":
@@ -197,18 +340,92 @@ final class AudioSocketClient: NSObject, ObservableObject {
     func sendTyped(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        guard !conversationDone, canSendAnswer else { return }
+        let original = state == .reviewing ? partialUserText : nil
+        player?.stop()
+        synthesizer.stopSpeaking(at: .immediate)
         stopListening()
-        sendTextInput(trimmed)
-        setState(.speaking)
+        partialUserText = ""
+        pausedDraft = ""
+        sendTextInput(trimmed, originalText: original)
     }
 
-    private func sendTextInput(_ text: String) {
-        DispatchQueue.main.async { self.transcript.append(Turn(speaker: .user, text: text)) }
-        let payload: [String: Any] = ["type": "text_input", "text": text]
-        if let d = try? JSONSerialization.data(withJSONObject: payload),
-           let s = String(data: d, encoding: .utf8) {
-            task?.send(.string(s)) { _ in }
+    private func sendTextInput(_ text: String, originalText: String? = nil) {
+        guard Config.userId == participantId, pendingAnswer == nil, let sessionId = recordingSessionId,
+              recoveryProtocol, let context = answerContext else {
+            setState(.error("Reliable answer recovery is unavailable. Please update/connect both services before sending; no new answer was sent."))
+            return
         }
+        let recording = takeOriginalRecording()
+        let pending = PendingAnswer(userId: participantId, server: Self.recoveryServer, sessionId: sessionId,
+            text: text, originalTranscript: originalText, expectsAudio: recording.data != nil, expectedContext: context)
+        do {
+            try recoveryStore.save(pending) // Persist before the first network send.
+            pendingAnswer = pending; hasPendingAnswer = true
+            transcript.append(Turn(speaker: .user, text: text))
+            recoveryNotice = "Waiting for the server to confirm your answer…"
+            transmit(pending, recording: recording)
+        } catch {
+            partialUserText = text
+            setState(.error("Your answer could not be stored safely on this phone and was not sent. Keep a copy or contact the study team."))
+        }
+    }
+
+    private func confirmPending(_ messageId: String) throws {
+        guard let pending = pendingAnswer, pending.messageId == messageId else { return }
+        try recoveryStore.remove(sessionId: pending.sessionId, messageId: messageId)
+        pendingAnswer = nil; hasPendingAnswer = false
+        receiptTimer?.invalidate()
+        recoveryNotice = "Answer saved. Care-team review is not confirmed."
+    }
+
+    func discardPendingAnswer() {
+        guard Config.userId == participantId, let pending = pendingAnswer else { return }
+        do {
+            try recoveryStore.remove(sessionId: pending.sessionId, messageId: pending.messageId)
+            pendingAnswer = nil; hasPendingAnswer = false
+            recoveryNotice = "Local recovery copy removed. This does not delete any server record."
+            disconnect()
+        } catch { setState(.error("Could not remove the local copy. Please try again.")) }
+    }
+
+    private func transmit(_ pending: PendingAnswer, recording: (data: Data?, partial: Bool) = (nil, false)) {
+        guard Config.userId == participantId, let sendingTask = task else { return }
+        do {
+            let s = String(decoding: try pending.wireData(), as: UTF8.self)
+            let turnID = pending.messageId
+            setState(.speaking)
+            receiptTimer?.invalidate()
+            receiptTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
+                guard let self, self.pendingAnswer?.messageId == turnID else { return }
+                self.setState(.error("Still waiting for confirmation. Your answer is retained on this phone. Reconnect to check; do not enter it again."))
+            }
+            // Snapshot the identity before any account switch; no service key on device.
+            var authRequest = URLRequest(url: Config.pushServiceBaseURL)
+            ParticipantCredentials.authorize(&authRequest)
+            let authorization = authRequest.value(forHTTPHeaderField: "Authorization")
+            let sessionId = recordingSessionId
+            sendingTask.send(.string(s)) { [weak self] error in
+                if error != nil {
+                    DispatchQueue.main.async {
+                        guard let self, self.task === sendingTask, Config.userId == self.participantId,
+                              self.pendingAnswer?.messageId == turnID else { return }
+                        self.setState(.error("Could not confirm your answer. The local copy is retained; please reconnect."))
+                    }
+                    return
+                }
+                if let wav = recording.data, let sessionId {
+                    Task { [weak self] in
+                        do { try await CheckinService.uploadAudio(sessionId: sessionId, turnId: turnID, wav: wav,
+                            partial: recording.partial, authorization: authorization) }
+                        catch { DispatchQueue.main.async {
+                            guard let self, Config.userId == self.participantId else { return }
+                            self.recordingWarning = "Your text answer can be confirmed separately, but its optional recording could not be saved."
+                        } }
+                    }
+                }
+            }
+        } catch { setState(.error("Could not prepare the saved answer. It has not been deleted.")) }
     }
 
     // MARK: - Bot speech (out)
@@ -219,6 +436,9 @@ final class AudioSocketClient: NSObject, ObservableObject {
         do {
             let p = try AVAudioPlayer(data: data)
             p.delegate = self
+            p.enableRate = true
+            // Calibrate to the server's actual TTS rate, including provider overrides.
+            p.rate = speechRate / serverSpeechRate
             player = p
             resumeListeningAfterSpeech = thenListen
             p.play()
@@ -235,6 +455,7 @@ final class AudioSocketClient: NSObject, ObservableObject {
         resumeListeningAfterSpeech = thenListen
         let utt = AVSpeechUtterance(string: text)
         utt.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utt.rate = AVSpeechUtteranceDefaultSpeechRate * speechRate
         synthesizer.delegate = self
         synthesizer.speak(utt)
     }
@@ -244,6 +465,8 @@ final class AudioSocketClient: NSObject, ObservableObject {
             setState(.ended)
         } else if resumeListeningAfterSpeech {
             startListening()
+        } else {
+            setState(.idle)
         }
     }
 
@@ -251,13 +474,15 @@ final class AudioSocketClient: NSObject, ObservableObject {
 
     private func startListening() {
         DispatchQueue.main.async { [weak self] in
-            guard let self, !self.isListening, !self.conversationDone else { return }
+            guard let self, Config.userId == self.participantId, !self.isListening, !self.conversationDone, !self.hasPendingAnswer else { return }
+            if self.textOnly { self.setState(.listening); return }
 
             let input = self.audioEngine.inputNode
             let format = input.outputFormat(forBus: 0)
             input.removeTap(onBus: 0)
             input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
                 self?.request?.append(buffer)
+                self?.captureOriginal(buffer)
             }
             self.audioEngine.prepare()
             do { try self.audioEngine.start() } catch {
@@ -266,8 +491,9 @@ final class AudioSocketClient: NSObject, ObservableObject {
             }
 
             self.isListening = true
-            self.accumulatedText = ""
-            self.partialUserText = ""
+            self.accumulatedText = self.pausedDraft
+            self.partialUserText = self.pausedDraft
+            self.pausedDraft = ""
             self.setState(.listening)
             // Arm the silence timer up front so a turn with no speech still ends
             // and re-listens, rather than hanging.
@@ -300,6 +526,14 @@ final class AudioSocketClient: NSObject, ObservableObject {
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
+        if recognizer?.supportsOnDeviceRecognition == true {
+            req.requiresOnDeviceRecognition = true
+        } else {
+            textOnly = true
+            stopListening()
+            setState(.listening)
+            return
+        }
         request = req
 
         recognitionTask = recognizer?.recognitionTask(with: req) { [weak self] result, error in
@@ -333,6 +567,7 @@ final class AudioSocketClient: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.silenceTimer?.invalidate()
+            guard !self.manualFinish else { return }
             self.silenceTimer = Timer.scheduledTimer(withTimeInterval: self.turnSilenceSeconds, repeats: false) { [weak self] _ in
                 self?.finishTurn()
             }
@@ -345,8 +580,11 @@ final class AudioSocketClient: NSObject, ObservableObject {
             let text = self.partialUserText.trimmingCharacters(in: .whitespacesAndNewlines)
             self.stopListening()
             if !text.isEmpty {
-                self.sendTextInput(text)
-                self.setState(.speaking)   // awaiting bot reply
+                if self.reviewBeforeSending {
+                    self.setState(.reviewing)
+                } else {
+                    self.sendTextInput(text)
+                }
             } else {
                 self.startListening()       // heard nothing — keep listening
             }
@@ -368,6 +606,82 @@ final class AudioSocketClient: NSObject, ObservableObject {
     }
 
     // MARK: - Helpers
+
+    private func captureOriginal(_ buffer: AVAudioPCMBuffer) {
+        recordingLock.lock()
+        defer { recordingLock.unlock() }
+        guard recordOriginalAudio, answerConsentAccepted, let channel = buffer.floatChannelData?[0] else { return }
+        originalSampleRate = UInt32(buffer.format.sampleRate)
+        let maximumBytes = min(10_000_000 - 44, Int(originalSampleRate) * 120 * 2)
+        let count = min(Int(buffer.frameLength), max(0, (maximumBytes - originalPCM.count) / 2))
+        if count < Int(buffer.frameLength) { recordingPartial = true }
+        let samples = (0..<count).map { index -> Int16 in
+            let value = channel[index].isFinite ? max(-1, min(1, channel[index])) : 0
+            return Int16(value * 32767).littleEndian
+        }
+        samples.withUnsafeBufferPointer { pointer in originalPCM.append(contentsOf: UnsafeRawBufferPointer(pointer)) }
+    }
+
+    private func takeOriginalRecording() -> (data: Data?, partial: Bool) {
+        recordingLock.lock()
+        defer { recordingLock.unlock() }
+        guard !originalPCM.isEmpty else { return (nil, false) }
+        var wav = Data()
+        func ascii(_ text: String) { wav.append(contentsOf: text.utf8) }
+        func uint32(_ number: UInt32) { var n = number.littleEndian; withUnsafeBytes(of: &n) { wav.append(contentsOf: $0) } }
+        func uint16(_ number: UInt16) { var n = number.littleEndian; withUnsafeBytes(of: &n) { wav.append(contentsOf: $0) } }
+        ascii("RIFF"); uint32(UInt32(originalPCM.count) + 36); ascii("WAVEfmt "); uint32(16)
+        uint16(1); uint16(1); uint32(originalSampleRate); uint32(originalSampleRate * 2); uint16(2); uint16(16)
+        ascii("data"); uint32(UInt32(originalPCM.count)); wav.append(originalPCM)
+        originalPCM.removeAll(keepingCapacity: true)
+        let partial = recordingPartial
+        recordingPartial = false
+        return (wav, partial)
+    }
+
+    func finishSpeaking() { finishTurn() }
+
+    /// Reuse the same manual-finish/review path for standalone Ask dictation.
+    func startDictation() {
+        conversationDone = false
+        terminalState = nil
+        textOnly = false
+        requestPermissions { [weak self] granted in
+            guard let self else { return }
+            guard granted else { self.setState(.error("Voice input unavailable — please type your question.")); return }
+            self.configureAudioSession()
+            self.startListening()
+        }
+    }
+
+    func readAloud(_ text: String) {
+        conversationDone = false
+        configureAudioSession()
+        player?.stop()
+        synthesizer.stopSpeaking(at: .immediate)
+        speak(text, thenListen: false)
+    }
+
+    func replayQuestion() {
+        guard !conversationDone, !hasPendingAnswer, !lastBotText.isEmpty else { return }
+        pausedDraft = partialUserText
+        player?.stop()
+        synthesizer.stopSpeaking(at: .immediate)
+        speak(lastBotText, thenListen: true)
+    }
+
+    func togglePause() {
+        guard !conversationDone, !hasPendingAnswer else { return }
+        if state == .paused { startListening() }
+        else {
+            pausedDraft = partialUserText
+            resumeListeningAfterSpeech = false
+            stopListening()
+            player?.stop()
+            synthesizer.stopSpeaking(at: .immediate)
+            setState(.paused)
+        }
+    }
 
     private func setState(_ newValue: State) {
         if Thread.isMainThread { state = newValue }

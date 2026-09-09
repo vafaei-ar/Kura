@@ -15,10 +15,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
-        // Local-notification permission works on a free team (no push entitlement).
-        requestNotificationAuth(registerRemote: Config.pushEnabled)
-
         if Config.pushEnabled {
+            requestNotificationAuth(registerRemote: true)
             // Cold launch from a real push tap.
             if let userInfo = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {
                 handleCheckinPush(userInfo)
@@ -32,7 +30,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         return true
     }
 
-    /// Reconnect the live notify socket whenever the app comes to the foreground.
+    /// Restart foreground invitation polling; scenePhase also handles scene lifecycle.
     func applicationDidBecomeActive(_ application: UIApplication) {
         if !Config.pushEnabled, Config.hasUserId {
             NotifyClient.shared.start()
@@ -76,7 +74,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         handleCheckinPush(notification.request.content.userInfo)
-        completionHandler([.banner, .sound])
+        // AppState plays the foreground ring; avoid a second notification chime.
+        completionHandler(CheckinInvite(userInfo: notification.request.content.userInfo) == nil ? [.banner, .sound] : [.banner])
     }
 
     /// User tapped the notification.

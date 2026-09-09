@@ -22,6 +22,7 @@ actor DeviceRegistrationService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONEncoder().encode(body)
+        ParticipantCredentials.authorize(&request)
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)

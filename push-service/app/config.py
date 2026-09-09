@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     # VERA-cloud
     vera_api_base: str = ""
     vera_api_key: str = ""
+    vera_event_key: str = ""  # independent server-to-server shared secret
+    deployment_mode: str = "development"
 
     # APNs
     dry_run: bool = True

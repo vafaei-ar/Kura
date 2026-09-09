@@ -99,7 +99,7 @@ def test_ask_unavailable_without_vera():
     assert r.status_code == 200
     assert r.json()["kind"] == "refusal"  # VERA not configured in tests
     # empty question is handled
-    assert client.post("/v1/ask", json={"question": ""}).json()["kind"] == "refusal"
+    assert client.post("/v1/ask", json={"question": ""}).status_code == 422
 
 
 def test_resources_unavailable_without_vera():
@@ -172,7 +172,9 @@ def test_poll_pending_returns_then_clears():
     first = client.get("/v1/checkins/pending/p7").json()["invite"]
     assert first["session_id"] == sid
     assert first["type"] == "checkin_invite"
-    # second poll is empty (cleared)
+    # Repeat delivery until the app explicitly acknowledges durable receipt.
+    assert client.get("/v1/checkins/pending/p7").json()["invite"]["session_id"] == sid
+    assert client.post(f"/v1/checkins/{sid}/received").status_code == 200
     assert client.get("/v1/checkins/pending/p7").json()["invite"] is None
 
 
@@ -360,8 +362,8 @@ def test_notes_add_list_and_on_acknowledge():
     # acknowledge with an attached note
     client.post(f"/v1/checkins/{sid}/acknowledge", json={"note": "spoke with caregiver"})
     notes = client.get(f"/v1/checkins/{sid}/notes").json()
-    assert len(notes) == 2
-    assert [x["text"] for x in notes] == ["called patient, advised ER", "spoke with caregiver"]
+    assert len(notes) == 3  # includes the durable acknowledgement audit entry
+    assert [x["text"] for x in notes] == ["called patient, advised ER", "Acknowledged; owner: Dr. Lee (physician)", "spoke with caregiver"]
 
 
 def test_stats_endpoint():

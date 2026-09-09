@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import String, Boolean, Text, DateTime, create_engine, inspect, text
+from sqlalchemy import String, Boolean, Text, DateTime, Integer, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -51,6 +51,51 @@ class Clinician(Base):
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ParticipantAccess(Base):
+    """Provider-authored relationship; one respondent may represent one patient.
+
+    Different respondents use separate IDs/tokens even for the same patient.
+    Enrollment codes and bearer credentials are stored as SHA-256 digests only.
+    """
+    __tablename__ = "participant_access"
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    patient_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    role: Mapped[str] = mapped_column(String(16))
+    caregiver_consent: Mapped[bool] = mapped_column(Boolean, default=False)
+    stroke_type: Mapped[str] = mapped_column(String(32), default="unknown")
+    code_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True)
+    code_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    readiness_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    preferences_json: Mapped[str] = mapped_column(Text, default="{}")
+    profile_version: Mapped[int] = mapped_column(Integer, default=0)
+    readiness: Mapped[str] = mapped_column(String(32), default="not_reviewed")
+    reassess_on: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+
+
+class PatientContact(Base):
+    """Explicit future-invitation preference; never grants record access."""
+    __tablename__ = "patient_contacts"
+    patient_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    preferred_user_id: Mapped[str] = mapped_column(String(128))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class EnrollmentAudit(Base):
+    __tablename__ = "enrollment_audit"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), index=True)
+    actor: Mapped[str] = mapped_column(String(160))
+    action: Mapped[str] = mapped_column(String(48))
+    detail_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class Checkin(Base):
     __tablename__ = "checkins"
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -71,6 +116,14 @@ class Checkin(Base):
     resolved_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     # set once an emergency (Tier-1) alert email has been sent, to avoid resending
     alerted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    summary_version: Mapped[int] = mapped_column(Integer, default=0)
+    alert_state: Mapped[str] = mapped_column(String(32), default="not_required")
+    alert_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    alert_next_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    owner: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    invite_received_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    session_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    needs_revoke: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Setting(Base):
@@ -135,6 +188,18 @@ def _ensure_columns(engine) -> None:
         ("checkins", "acknowledged_by", "VARCHAR(128)"),
         ("checkins", "resolved_by", "VARCHAR(128)"),
         ("checkins", "alerted_at", "TIMESTAMP"),
+        ("checkins", "summary_version", "INTEGER DEFAULT 0"),
+        ("checkins", "alert_state", "VARCHAR(32) DEFAULT 'not_required'"),
+        ("checkins", "alert_attempts", "INTEGER DEFAULT 0"),
+        ("checkins", "alert_next_at", "TIMESTAMP"),
+        ("checkins", "owner", "VARCHAR(128)"),
+        ("checkins", "invite_received_at", "TIMESTAMP"),
+        ("checkins", "session_token", "TEXT"),
+        ("checkins", "needs_revoke", "BOOLEAN DEFAULT FALSE"),
+        ("participant_access", "preferences_json", "TEXT DEFAULT '{}'"),
+        ("participant_access", "profile_version", "INTEGER DEFAULT 0"),
+        ("participant_access", "readiness", "VARCHAR(32) DEFAULT 'not_reviewed'"),
+        ("participant_access", "reassess_on", "VARCHAR(10)"),
     ]
     insp = inspect(engine)
     tables = set(insp.get_table_names())
