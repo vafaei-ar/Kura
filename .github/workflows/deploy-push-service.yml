@@ -1,45 +1,67 @@
-name: Deploy push-service to Azure
+name: Deploy Kura manually
 
-# Auto-deploys the push-service whenever you push changes to it on main.
-# One-time setup is in push-service/DEPLOY_AZURE.md (create the Web App, add the
-# AZURE_WEBAPP_PUBLISH_PROFILE secret, set AZURE_WEBAPP_NAME below).
-
+# Merges/pushes run ci.yml only. This workflow must be explicitly dispatched.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "push-service/**"
-      - ".github/workflows/deploy-push-service.yml"
-  workflow_dispatch:        # lets you trigger a deploy manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Full 40-character main commit SHA approved for this release
+        required: true
+        type: string
+      confirmation:
+        description: Type DEPLOY KURA after paired-backend readiness and backup checks
+        required: true
+        type: string
 
-env:
-  AZURE_WEBAPP_NAME: kura-push      # <-- change to your Azure Web App name
-  PYTHON_VERSION: "3.11"
+permissions:
+  contents: read
+
+concurrency:
+  group: kura-azure-deployment
+  cancel-in-progress: false
 
 jobs:
-  build-test-deploy:
+  authorize:
+    name: Validate manual release request
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require main, an exact SHA, and explicit confirmation
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          test "$EVENT" = workflow_dispatch
+          test "$REF" = refs/heads/main
+          test "$REQUESTED_SHA" = "$SHA"
+          test "$CONFIRMATION" = 'DEPLOY KURA'
+
+  checks:
+    name: Release checks
+    needs: authorize
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Deploy approved Kura commit
+    needs: [authorize, checks]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.commit_sha == github.sha && inputs.confirmation == 'DEPLOY KURA'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        working-directory: push-service
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Package tracked service source without runtime data
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run tests
-        working-directory: push-service
-        run: pytest -q
-
+          mkdir -p "$RUNNER_TEMP/kura-deploy"
+          git archive --format=tar HEAD:push-service | tar -x -C "$RUNNER_TEMP/kura-deploy" --exclude=data --exclude=tests --exclude=.env
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          app-name: kura-push
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: push-service
+          package: ${{ runner.temp }}/kura-deploy

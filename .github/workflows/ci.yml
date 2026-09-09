@@ -1,0 +1,67 @@
+name: Kura CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'feat/**']
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEPLOYMENT_MODE: development
+      DATABASE_URL: 'sqlite://'
+      DRY_RUN: 'true'
+      SMTP_HOST: ''
+      ALERT_EMAIL_TO: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: push-service/requirements.txt
+      - name: Install test dependencies
+        working-directory: push-service
+        run: python -m pip install -r requirements.txt
+      - name: Run backend tests
+        working-directory: push-service
+        run: python -m pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check clinician-console JavaScript syntax
+        working-directory: push-service
+        run: |
+          python -c 'import re; from app.console import CONSOLE_HTML; print("\n".join(re.findall(r"<script[^>]*>(.*?)</script>", CONSOLE_HTML, re.S)))' | node --check
+
+  ios:
+    name: iOS build and Swift tests
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run recovery and ringing tests
+        run: swift test --package-path ios --scratch-path "$RUNNER_TEMP/kura-swift-tests"
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+      - name: Build unsigned iOS simulator app
+        run: |
+          xcodebuild -quiet -project ios/Kura.xcodeproj -target Kura \
+            -sdk iphonesimulator -configuration Debug \
+            SYMROOT="$RUNNER_TEMP/kura-products" OBJROOT="$RUNNER_TEMP/kura-objects" \
+            CODE_SIGNING_ALLOWED=NO build

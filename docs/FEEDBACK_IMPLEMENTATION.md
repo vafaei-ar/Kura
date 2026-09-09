@@ -220,6 +220,10 @@ authentication, Azure integration, or representative aphasia testing is certifie
 
 ## Release and rollback
 
+CI and deployment are now separate; see [Manual release](MANUAL_RELEASE.md).
+PRs and main/feature pushes run checks only. Deployment requires a manually
+dispatched main run, exact SHA and `DEPLOY KURA` confirmation, then passing checks.
+
 Keep both repositories on the coordinated branch and review the paired contract.
 Do not deploy only one side: older clients lack enrollment credentials and the new
 receipt/audio contracts. Before migration, back up the database and outcome volume.
