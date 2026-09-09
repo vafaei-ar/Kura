@@ -1,10 +1,10 @@
 """Request/response and storage models."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 def _now() -> datetime:
@@ -32,7 +32,8 @@ class DeviceRegistration(BaseModel):
 class CompleteCheckinRequest(BaseModel):
     """Sent by the app when a check-in ends; optional self-reported urgency."""
 
-    urgency: Optional[str] = None  # routine | soon | urgent
+    urgency: Optional[Literal["routine", "soon", "urgent", "unsure"]] = None
+    state: Optional[Literal["completed", "declined", "withdrawn", "interrupted", "escalated"]] = None
 
 
 class Device(DeviceRegistration):
@@ -51,11 +52,66 @@ class StartCheckinRequest(BaseModel):
     honorific: str = ""
     role: str = "survivor"  # survivor | caregiver | clinician (VERA role track)
     empathy: bool = False   # optional empathetic acknowledgments (DRAFT)
+    caregiver_consent: bool = False
+    patient_id: Optional[str] = None
+    stroke_type: Literal["ischemic", "hemorrhagic", "unknown"] = "unknown"
+    rate: Optional[float] = Field(default=None, ge=0.5, le=1.5)
+    use_preferred_contact: bool = False
 
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class EnrollmentRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    patient_id: Optional[str] = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    role: Literal["survivor", "caregiver"] = "survivor"
+    caregiver_consent: bool = False
+    stroke_type: Literal["ischemic", "hemorrhagic", "unknown"] = "unknown"
+    readiness_note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class RedeemRequest(BaseModel):
+    code: str = Field(min_length=20, max_length=200)
+
+
+class CommunicationPreferences(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    communication_difficulty: Literal["not_recorded", "no", "yes", "unsure"] = "not_recorded"
+    support_preference: Literal["independent", "helper", "staff", "unsure"] = "independent"
+    text_only: bool = False
+    speech_rate: float = Field(default=0.85, ge=0.6, le=1.2)
+    manual_finish: bool = True
+    review_before_sending: bool = True
+    silence_seconds: int = Field(default=8, ge=3, le=30)
+
+
+class PreferencesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=0)
+    preferences: CommunicationPreferences
+
+
+class ReadinessUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=0)
+    readiness: Literal["not_reviewed", "ready", "with_support", "paused"]
+    reassess_on: Optional[date] = None
+    note: str = Field(default="", max_length=2000)
+
+
+class ContactHandoff(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_contact_version: int = Field(ge=0)
+    target_user_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    agreement_confirmed: bool = False
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class RecordingConsentRequest(BaseModel):
+    accepted: bool
 
 
 class NoteRequest(BaseModel):
@@ -65,6 +121,21 @@ class NoteRequest(BaseModel):
 class TriageActionRequest(BaseModel):
     """Optional note attached when acknowledging/resolving a check-in."""
     note: Optional[str] = None
+    owner: Optional[str] = Field(default=None, max_length=128)
+
+
+class OutcomeEvent(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    version: int = Field(ge=1)
+    summary: dict
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    user_id: Optional[str] = None
+    request_id: Optional[str] = Field(default=None, max_length=59, pattern=r"^[A-Za-z0-9_-]+$")
+    share_with_team: bool = False
+    callback_requested: bool = False
 
 
 class AdminSettingsRequest(BaseModel):

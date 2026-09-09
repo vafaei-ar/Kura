@@ -132,6 +132,8 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </label>
     <input id="patientSearch" placeholder="Search patients…" oninput="renderDevices()" class="grow"/>
     <button class="ghost" onclick="loadAll()">Refresh</button>
+    <button onclick="enrollmentForm()">Enroll respondent</button>
+    <button onclick="listEnrollmentProfiles()">Enrollment &amp; support</button>
   </div>
 
   <h2>Patients</h2>
@@ -146,6 +148,8 @@ CONSOLE_HTML = """<!DOCTYPE html>
         <option value="all">All</option>
         <option value="priority">Red flags only</option>
         <option value="open">Open priority (worklist)</option>
+        <option value="failed">Failed alert delivery</option>
+        <option value="unassigned">Unassigned priority</option>
       </select>
     </span>
   </h2>
@@ -165,7 +169,8 @@ CONSOLE_HTML = """<!DOCTYPE html>
 const $ = (id) => document.getElementById(id);
 let DEVICES = [];
 function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),3200); }
-function closeModal(){ $("overlay").classList.remove("show"); }
+const audioURLs = [];
+function closeModal(){ enrollmentLoad++; enrollmentProfile=null; audioURLs.splice(0).forEach(url=>URL.revokeObjectURL(url)); $("modal").querySelectorAll('audio').forEach(a=>a.pause()); $("overlay").classList.remove("show"); }
 function fmt(ts){ return ts ? new Date(ts).toLocaleString() : "—"; }
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}[c])); }
 
@@ -321,11 +326,13 @@ function triageCell(x){
   if(x.resolved_at) return `<span class="ack">✓ Resolved</span><div class="muted">${esc(x.resolved_by||"")} · ${fmt(x.resolved_at)}</div>`;
   if(x.has_priority === true){
     let s = '<span style="color:var(--red);font-weight:600">⚠ Priority</span> ' + agePill(x.started_at);
+    s += `<div class="muted">Alert: ${esc(x.alert_state||'not_required')} · attempts ${esc(x.alert_attempts||0)}</div>`;
+    if(x.owner) s += `<div class="muted">Owner: ${esc(x.owner)}</div>`;
     if(x.acknowledged_at) s += `<div class="muted seen">👁 ${esc(x.acknowledged_by||"")} · ${fmt(x.acknowledged_at)}</div>`;
     return s;
   }
-  if(x.status === "completed") return '<span style="color:#1f7a3f">✓ Routine</span>';
-  return '<span class="muted">in progress…</span>';
+  if(x.status === "completed") return '<span>Completed · no automatic priority flag</span>';
+  return `<span class="muted">${esc(x.status||'unknown')}</span>`;
 }
 
 function triageButtons(x){
@@ -348,6 +355,8 @@ async function loadHistory(){
     let url = "/v1/checkins";
     if(f === "priority") url += "?priority_only=true";
     else if(f === "open") url += "?unresolved_priority=true";
+    else if(f === "failed") url += "?failed_delivery=true";
+    else if(f === "unassigned") url += "?unassigned=true";
     const r = await api(url);
     const h = await r.json();
     $("history").innerHTML = h.length ? h.map(x=>`
@@ -404,6 +413,128 @@ async function start(userId, btn){
 }
 
 /* ---------- result modal ---------- */
+let enrollmentProfile = null;
+let enrollmentLoad = 0;
+async function listEnrollmentProfiles(){
+  const sequence=++enrollmentLoad;
+  enrollmentProfile=null;
+  $("overlay").classList.add("show");
+  $("modal").innerHTML='<button class="closeX" onclick="closeModal()">✕</button><p>Loading enrollments…</p>';
+  try {
+    const response=await api('/v1/enrollments'); const rows=await response.json();
+    if(!response.ok) throw new Error('Could not load enrollments.');
+    if(sequence!==enrollmentLoad) return;
+    $("modal").innerHTML='<button class="closeX" onclick="closeModal()">✕</button><h2>Enrollment &amp; support</h2>'
+      + '<p>Readiness describes support for using the app, not a clinical assessment. Review it with the respondent; no fixed recovery waiting period is assumed.</p>'
+      + (rows.length ? rows.map(row=>'<p><button data-user="'+esc(row.user_id)+'" onclick="viewEnrollment(this.dataset.user)">'+esc(row.user_id)+'</button> · '+esc(row.role)+' · '+esc(row.readiness)+(row.revoked?' · revoked':'')
+          +(row.reassess_on?' · reassess '+esc(row.reassess_on):'')+'</p>').join(''):'<p>No verified enrollments yet.</p>');
+  } catch(error){toast(error.message);}
+}
+async function viewEnrollment(userId){
+  const sequence=++enrollmentLoad;
+  enrollmentProfile=null;
+  $("overlay").classList.add("show");
+  $("modal").innerHTML='<button class="closeX" onclick="closeModal()">✕</button><p>Loading support profile…</p>';
+  try {
+    const response=await api('/v1/enrollments/'+encodeURIComponent(userId)+'/profile');
+    const p=await response.json(); if(!response.ok) throw new Error(p.detail||'Profile unavailable');
+    if(sequence!==enrollmentLoad) return;
+    enrollmentProfile=p;
+    const choices=[['not_reviewed','Not reviewed'],['ready','Ready to use independently'],['with_support','Ready with agreed support'],['paused','Pause new check-ins']];
+    $("modal").innerHTML='<button class="closeX" onclick="closeModal()">✕</button><h2>Support: '+esc(p.user_id)+'</h2>'
+      + '<p>'+esc(p.role)+' · patient '+esc(p.patient_id||'not linked')+(p.revoked?' · REVOKED':'')+'</p>'
+      + '<h3>Respondent communication choices</h3><p>These are preferences, not a diagnosis or access permission.</p><pre style="white-space:pre-wrap">'+esc(JSON.stringify(p.preferences,null,2))+'</pre>'
+      + '<h3>Readiness and reassessment</h3><label>Agreed app-use readiness <select id="profileReadiness">'
+      + choices.map(([value,label])=>'<option value="'+value+'"'+(p.readiness===value?' selected':'')+'>'+label+'</option>').join('')+'</select></label>'
+      + '<label>Reassess on (optional; does not schedule a notification)<input type="date" id="profileDate" value="'+esc(p.reassess_on||'')+'"/></label>'
+      + '<label>Support / readiness note<textarea id="profileNote">'+esc(p.readiness_note||'')+'</textarea></label>'
+      + '<button onclick="saveReadiness()"'+(p.revoked?' disabled':'')+'>Save readiness</button>'
+      + '<h3>Preferred respondent for future invitations</h3><p>Current: '+esc(p.preferred_user_id||'not selected')+'. This does not merge records, revoke caregiver access, or change an active check-in.</p>'
+      + '<select id="contactTarget"><option value="">Choose a reviewed respondent</option>'
+      + p.linked_respondents.map(r=>'<option value="'+esc(r.user_id)+'"'+(!['ready','with_support'].includes(r.readiness)?' disabled':'')+'>'+esc(r.user_id)+' — '+esc(r.role)+' — '+esc(r.readiness)+'</option>').join('')+'</select>'
+      + '<p><label><input type="checkbox" id="contactAgreement"/> Contact preference agreed with the people involved; required permission documented</label></p>'
+      + '<textarea id="contactNote" placeholder="Document the agreed handoff and support arrangement"></textarea>'
+      + '<button onclick="saveContactHandoff()"'+(p.revoked||!p.patient_id?' disabled':'')+'>Save preferred respondent</button> '
+      + '<button onclick="startPreferredCheckin(this)"'+(p.revoked||!p.preferred_user_id?' disabled':'')+'>Start with preferred respondent</button>'
+      + '<h3>Profile audit (latest 50)</h3>'
+      + (p.audit.length ? p.audit.map(a=>'<div class="note"><strong>'+esc(a.action)+'</strong> · '+esc(a.actor)+' · '+esc(fmt(a.at))+'<pre style="white-space:pre-wrap">'+esc(JSON.stringify(a.detail,null,2))+'</pre></div>').join(''):'<p>No profile changes recorded yet.</p>');
+  } catch(error){toast(error.message);}
+}
+async function saveReadiness(){
+  const p=enrollmentProfile; if(!p)return;
+  try {
+    const response=await api('/v1/enrollments/'+encodeURIComponent(p.user_id)+'/readiness',{method:'PUT',body:JSON.stringify({
+      expected_version:p.version,readiness:$("profileReadiness").value,reassess_on:$("profileDate").value||null,note:$("profileNote").value})});
+    const result=await response.json(); if(!response.ok) throw new Error(typeof result.detail==='string'?result.detail:'Check the readiness fields.');
+    toast('Readiness saved.'); if(enrollmentProfile===p)viewEnrollment(p.user_id);
+  } catch(error){toast(error.message);}
+}
+async function saveContactHandoff(){
+  const p=enrollmentProfile; if(!p)return;
+  const target=$("contactTarget").value;
+  if(!target||!$("contactAgreement").checked||!$("contactNote").value.trim()){toast('Select a reviewed respondent and document the agreed change.');return;}
+  try {
+    const response=await api('/v1/enrollments/'+encodeURIComponent(p.user_id)+'/handoff',{method:'POST',body:JSON.stringify({
+      expected_contact_version:p.contact_version,target_user_id:target,agreement_confirmed:true,note:$("contactNote").value.trim()})});
+    const result=await response.json(); if(!response.ok) throw new Error(typeof result.detail==='string'?result.detail:'Handoff could not be saved.');
+    toast('Preferred respondent saved. Existing records and permissions are unchanged.'); if(enrollmentProfile===p)viewEnrollment(p.user_id);
+  } catch(error){toast(error.message);}
+}
+async function startPreferredCheckin(button){
+  const p=enrollmentProfile; if(!p||!p.preferred_user_id)return;
+  if(!confirm('Start a new check-in with '+p.preferred_user_id+'? Existing conversations are unchanged.'))return;
+  button.disabled=true;
+  try {
+    const response=await api('/v1/checkins/start',{method:'POST',body:JSON.stringify({user_id:p.user_id,use_preferred_contact:true,scenario:$("scenario").value})});
+    const result=await response.json(); if(!response.ok) throw new Error(result.detail||'Could not start check-in.');
+    toast('Check-in created for '+result.user_id+'.');loadHistory();
+  } catch(error){toast(error.message);} finally{button.disabled=false;}
+}
+
+function enrollmentForm(){
+  enrollmentLoad++; enrollmentProfile=null;
+  $("overlay").classList.add("show");
+  $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button><h2>Enroll respondent</h2>'
+    + '<p>Use different respondent IDs for different people. Patient context is only linked with verified permission.</p>'
+    + '<label>Respondent ID<input id="enrollUser" placeholder="Respondent ID"/></label>'
+    + '<label>Patient ID (optional)<input id="enrollPatient" placeholder="Verified patient ID, or blank for generic"/></label>'
+    + '<label>Role<select id="enrollRole"><option value="survivor">Survivor</option><option value="caregiver">Caregiver</option></select></label>'
+    + '<label>Verified stroke type<select id="enrollStroke"><option value="unknown">Unknown / conflicting</option><option value="ischemic">Ischemic</option><option value="hemorrhagic">Hemorrhagic</option></select></label>'
+    + '<p><label><input type="checkbox" id="enrollConsent"/> Caregiver permission verified and documented</label></p>'
+    + '<textarea id="enrollReadiness" placeholder="Readiness / assistance preferences (optional)"></textarea>'
+    + '<button onclick="submitEnrollment()">Create one-use code</button>';
+}
+async function submitEnrollment(){
+  const body = {user_id:$("enrollUser").value.trim(), patient_id:$("enrollPatient").value.trim()||null,
+    role:$("enrollRole").value, stroke_type:$("enrollStroke").value,
+    caregiver_consent:$("enrollConsent").checked, readiness_note:$("enrollReadiness").value.trim()||null};
+  const response=await api('/v1/enrollments',{method:'POST',body:JSON.stringify(body)});
+  const result=await response.json();
+  if(!response.ok){toast(typeof result.detail==='string'?result.detail:'Please check the enrollment fields.');return;}
+  $("modal").innerHTML='<button class="closeX" onclick="closeModal()">✕</button><h2>One-use enrollment code</h2>'
+    + '<p>Give this code privately to the respondent. It expires in 48 hours. It is shown only now.</p>'
+    + '<code style="word-break:break-all">'+esc(result.enrollment_code)+'</code>';
+}
+
+function renderAudio(sessionId, clips){
+  if(!clips || !clips.length) return '<p class="muted">No original recording available. Recording requires separate consent and deployment enablement.</p>';
+  return clips.map(clip=>'<div class="note">Original respondent voice · '+esc(Number(clip.duration_seconds).toFixed(1))+' seconds'
+    + (clip.partial?' · <strong>Partial recording</strong>':'') + ' · expires '+esc(clip.expires_at)
+    + (clip.deleted_at || Date.parse(clip.expires_at)<=Date.now() ? '<p>Expired / unavailable</p>'
+      : `<p><button onclick="playOriginal('${esc(sessionId)}','${esc(clip.id)}',this)">Load authorized audio</button></p>`)
+    + '</div>').join('');
+}
+async function playOriginal(sessionId, clipId, button){
+  button.disabled=true;
+  try{
+    const response=await api(`/v1/checkins/${encodeURIComponent(sessionId)}/audio/${encodeURIComponent(clipId)}`);
+    if(!response.ok) throw new Error('Recording unavailable or access denied');
+    const url=URL.createObjectURL(await response.blob()); audioURLs.push(url);
+    const player=document.createElement('audio'); player.controls=true; player.src=url;
+    button.replaceWith(player); player.play().catch(()=>{});
+  }catch(error){button.disabled=false;toast(error.message);}
+}
+
 function flagText(f){
   if(typeof f === "string") return f;
   return f.label || f.text || f.message || f.reason || f.name || JSON.stringify(f);
@@ -438,13 +569,18 @@ async function viewResult(sessionId){
     const s = data.summary;
     const banner = s.has_priority
       ? '<div class="banner priority">⚠ Priority — needs clinician review</div>'
-      : '<div class="banner ok">✓ All routine — no priority flags</div>';
+      : '<div class="banner">No automatic priority flags detected — not a clinical all-clear</div>';
     $("modal").innerHTML = '<button class="closeX" onclick="closeModal()">✕</button>'
       + '<h2 style="margin-top:0">Check-in result</h2>'
       + banner
+      + `<p>Session: ${esc(s.state||'unknown')} · revision ${esc(s.version||0)} · policy ${esc(s.policy_version||'legacy')} (${esc(s.policy_status||'draft')})</p>`
+      + (s.callback_requested ? '<p><strong>Human follow-up requested</strong> — response not yet confirmed.</p>' : '')
       + (s.user_reported_urgency ? `<p><strong>Patient-reported urgency:</strong> ${esc(s.user_reported_urgency)}</p>` : '')
       + '<h2>Priority items</h2>' + renderFlags(s.priority_items)
       + '<h2>Routine items</h2>' + renderFlags(s.routine_items)
+      + '<details><summary>Answers and symptom details</summary><pre style="white-space:pre-wrap">' + esc(JSON.stringify(s.responses||{},null,2)) + '</pre></details>'
+      + '<details><summary>Recognized text and corrections (not original audio)</summary><pre style="white-space:pre-wrap">' + esc(JSON.stringify(s.transcription_reviews||[],null,2)) + '</pre></details>'
+      + '<h2>Original voice evidence</h2>' + renderAudio(sessionId, s.original_audio)
       + (s.suggested_route ? `<p class="muted">Suggested routing (DRAFT): ${esc(typeof s.suggested_route==='string'?s.suggested_route:JSON.stringify(s.suggested_route))}</p>` : '')
       + '<h2>Notes</h2>' + renderNotes(notes) + noteEditor(sessionId, s.has_priority);
   }catch(e){

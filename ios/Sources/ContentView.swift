@@ -6,6 +6,7 @@ struct ContentView: View {
     @EnvironmentObject private var state: AppState
     @State private var simulating = false
     @State private var simError: String?
+    @ObservedObject private var ringer = IncomingCheckinRinger.shared
 
     var body: some View {
         NavigationStack {
@@ -36,6 +37,13 @@ struct ContentView: View {
                 }
 
                 registrationCard
+
+                NavigationLink {
+                    CommunicationPreferencesView()
+                } label: {
+                    ActionTile(title: "Communication preferences", systemImage: "slider.horizontal.3")
+                }
+                .buttonStyle(.plain)
 
                 NavigationLink {
                     HistoryView()
@@ -140,6 +148,14 @@ struct ContentView: View {
                 case .failed(let m): Label(m, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
             }
+            Divider()
+            Toggle("Ring for incoming check-ins", isOn: $ringer.enabled)
+            Text("Rings only while this app is open. Silent mode and device volume apply. It stops after 30 seconds; this is not a telephone call.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Button(ringer.ringingSessionId == nil ? "Test ring" : "Silence ring") {
+                if ringer.ringingSessionId == nil { ringer.testRing() } else { ringer.stop() }
+            }.disabled(!ringer.enabled)
+            if let warning = ringer.warning { Text(warning).font(.footnote).foregroundStyle(.orange) }
         }
         .font(.subheadline)
         .card()
@@ -147,7 +163,7 @@ struct ContentView: View {
 
     private var inviteCard: some View {
         VStack(spacing: 12) {
-            Label("Check-in ready", systemImage: "bell.badge.fill")
+            Label("Incoming check-in", systemImage: "bell.badge.fill")
                 .font(.system(.headline, design: .rounded))
                 .foregroundStyle(Theme.teal)
             Text("Your care team has a quick voice check-in for you.")
@@ -162,6 +178,10 @@ struct ContentView: View {
                     Label("Start check-in", systemImage: "mic.fill")
                 }
                 .buttonStyle(PrimaryButtonStyle())
+                if ringer.ringingSessionId == invite.sessionId {
+                    Button("Silence ring") { ringer.stop() }
+                        .buttonStyle(.bordered)
+                }
             }
         }
         .padding(4)
@@ -224,8 +244,12 @@ private struct OnboardingView: View {
     @State private var id = ""
     @State private var role = "survivor"
     @State private var name = ""
+    @State private var enrollmentCode = ""
+    @State private var enrolling = false
+    @State private var enrollmentError: String?
 
     var body: some View {
+        ScrollView {
         VStack(spacing: 22) {
             Spacer()
             Image(systemName: "waveform")
@@ -237,7 +261,7 @@ private struct OnboardingView: View {
                 .shadow(color: Theme.teal.opacity(0.35), radius: 14, y: 7)
             Text("Welcome to VERA")
                 .font(.system(.largeTitle, design: .rounded).weight(.bold))
-            Text("Enter the participant ID your care team gave you, and tell us who will be answering.")
+            Text("Enter the enrollment code your care team gave you. The code links you to the correct patient and permissions.")
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -249,7 +273,11 @@ private struct OnboardingView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .font(.title3)
 
-            TextField("Participant ID", text: $id)
+            SecureField("Enrollment code", text: $enrollmentCode)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+            if Config.allowDemoEnrollment {
+              TextField("Demo participant ID (development only)", text: $id)
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
                 .padding()
@@ -265,15 +293,31 @@ private struct OnboardingView: View {
                 }
                 .pickerStyle(.segmented)
             }
+            }
+            if let enrollmentError { Text(enrollmentError).foregroundStyle(.red).font(.callout) }
 
-            Button { onSave(id, role, name) } label: { Text("Continue") }
+            Button {
+                if !enrollmentCode.isEmpty {
+                    enrolling = true
+                    Task {
+                        do {
+                            let result = try await ParticipantCredentials.redeem(enrollmentCode)
+                            enrolling = false
+                            onSave(result.user_id, result.role, name)
+                        } catch {
+                            enrolling = false
+                            enrollmentError = "The code could not be used. Check it or ask the study team for a new code."
+                        }
+                    }
+                } else if Config.allowDemoEnrollment { onSave(id, role, name) }
+            } label: { Text(enrolling ? "Enrolling…" : "Continue") }
                 .buttonStyle(PrimaryButtonStyle())
-                .disabled(id.trimmingCharacters(in: .whitespaces).isEmpty)
-                .opacity(id.trimmingCharacters(in: .whitespaces).isEmpty ? 0.6 : 1)
+                .disabled(enrolling || (enrollmentCode.isEmpty && (!Config.allowDemoEnrollment || id.trimmingCharacters(in: .whitespaces).isEmpty)))
 
             Spacer()
         }
         .padding(24)
+        }
         .screenBackground()
     }
 }
@@ -300,6 +344,7 @@ private struct HistoryView: View {
                                     .font(.system(.headline, design: .rounded))
                                 Text("\(item.lines.count) messages")
                                     .font(.subheadline).foregroundStyle(.secondary)
+                                if let status = item.state { Text(status.capitalized).font(.caption) }
                             }
                         }
                         .padding(.vertical, 4)
@@ -373,6 +418,9 @@ private struct ResourcesView: View {
     @State private var disclaimer = ""
     @State private var loading = true
     @State private var failed = false
+    @State private var region = ""
+    @State private var need = ""
+    @State private var coverageNote = ""
 
     var body: some View {
         Group {
@@ -411,6 +459,7 @@ private struct ResourcesView: View {
                     }
                     if !disclaimer.isEmpty {
                         Section {
+                            if !coverageNote.isEmpty { Text(coverageNote).font(.callout) }
                             Text(disclaimer).font(.footnote).foregroundStyle(.secondary)
                                 .listRowBackground(Color.clear)
                         }
@@ -420,6 +469,17 @@ private struct ResourcesView: View {
             }
         }
         .navigationTitle("Help & resources")
+        .safeAreaInset(edge: .top) {
+            VStack {
+                TextField("County (optional)", text: $region).textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                Picker("Need", selection: $need) {
+                    Text("All needs").tag("")
+                    ForEach(["transportation", "meals", "rehab", "devices", "support"], id: \.self) { Text($0.capitalized).tag($0) }
+                }
+                Button("Find resources") { Task { await load() } }
+            }.padding().background(Color(.systemBackground))
+        }
         .background(Theme.screen.ignoresSafeArea())
         .task { await load() }
     }
@@ -436,13 +496,17 @@ private struct ResourcesView: View {
     }
 
     private func load() async {
-        let url = Config.pushServiceBaseURL.appendingPathComponent("/v1/resources")
+        loading = true; failed = false
+        var components = URLComponents(url: Config.pushServiceBaseURL.appendingPathComponent("/v1/resources"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "region", value: region.lowercased().trimmingCharacters(in: .whitespaces)), URLQueryItem(name: "need", value: need)].filter { !($0.value ?? "").isEmpty }
+        let url = components.url!
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 failed = true; loading = false; return
             }
             disclaimer = obj["disclaimer"] as? String ?? ""
+            coverageNote = obj["note"] as? String ?? ""
             var cats: [ResCategory] = []
             // Cast loosely, then narrow each level — JSONSerialization returns
             // bridged NSArray/NSDictionary, so a deep generic cast like
@@ -499,7 +563,7 @@ final class AskStore: ObservableObject {
 
     private static var url: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("kura_ask.json")
+            .appendingPathComponent("kura_ask_\(HistoryStore.participantKey).json")
     }
 
     private init() {
@@ -513,18 +577,28 @@ final class AskStore: ObservableObject {
 
     private func save() {
         if let data = try? JSONEncoder().encode(messages) {
-            try? data.write(to: Self.url, options: .atomic)
+            try? data.write(to: Self.url, options: [.atomic, .completeFileProtection])
         }
     }
 
     /// Wipe the conversation back to just the welcome message.
     func clear() { messages = [Self.welcome] }
+
+    func reloadParticipant() {
+        if let data = try? Data(contentsOf: Self.url),
+           let saved = try? JSONDecoder().decode([Msg].self, from: data), !saved.isEmpty {
+            messages = saved
+        } else { messages = [Self.welcome] }
+    }
 }
 
 private struct AskView: View {
     @ObservedObject private var store = AskStore.shared
+    @StateObject private var voice = AudioSocketClient()
     @State private var input = ""
     @State private var sending = false
+    @State private var shareWithTeam = false
+    @State private var callbackRequested = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -548,6 +622,23 @@ private struct AskView: View {
                 }
             }
 
+            VStack {
+                Toggle("Share this question with the care team", isOn: $shareWithTeam)
+                if shareWithTeam { Toggle("Request human follow-up", isOn: $callbackRequested) }
+                HStack {
+                    Button(voice.state == .listening ? "I'm finished" : "Speak question") {
+                        if voice.state == .listening { voice.finishSpeaking() } else { voice.startDictation() }
+                    }
+                    if let last = store.messages.last(where: { !$0.mine }) {
+                        Button("Read answer") { voice.readAloud(last.text) }
+                    }
+                }.buttonStyle(.bordered)
+                if !voice.partialUserText.isEmpty && voice.state == .listening {
+                    Text(voice.partialUserText).font(.callout)
+                }
+                if case .error(let message) = voice.state { Text(message).font(.callout) }
+            }.padding(.horizontal)
+
             HStack(spacing: 8) {
                 TextField("Ask a question…", text: $input)
                     .textFieldStyle(.roundedBorder)
@@ -561,6 +652,10 @@ private struct AskView: View {
             .padding()
         }
         .navigationTitle("Ask VERA")
+        .onChange(of: voice.state) { value in
+            if value == .reviewing { input = voice.partialUserText }
+        }
+        .onDisappear { voice.disconnect() }
         .navigationBarTitleDisplayMode(.inline)
         .background(Theme.screen.ignoresSafeArea())
         .toolbar {
@@ -590,10 +685,12 @@ private struct AskView: View {
         guard !q.isEmpty else { return }
         store.messages.append(AskStore.Msg(mine: true, text: q, emergency: false))
         input = ""; focused = false; sending = true
+        let participant = Config.userId
 
         Task {
             let reply = await fetchAnswer(q)
             await MainActor.run {
+                guard Config.userId == participant else { sending = false; return }
                 store.messages.append(reply)
                 sending = false
             }
@@ -605,7 +702,11 @@ private struct AskView: View {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["question": q])
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "question": q, "user_id": Config.userId, "request_id": UUID().uuidString,
+            "share_with_team": shareWithTeam, "callback_requested": shareWithTeam && callbackRequested
+        ])
+        ParticipantCredentials.authorize(&req)
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
             guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {

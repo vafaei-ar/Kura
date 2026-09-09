@@ -3,6 +3,11 @@ import Foundation
 /// Central configuration. For a real build, prefer an .xcconfig or a build
 /// setting rather than hardcoding. These defaults point at a local dev server.
 enum Config {
+    #if DEBUG
+    static let allowDemoEnrollment = true
+    #else
+    static let allowDemoEnrollment = false
+    #endif
     /// Real Apple Push requires the PAID Apple Developer Program + the Push
     /// Notifications capability. On a free personal team the APNs registration
     /// path is not entitled and can crash on launch, so keep this `false`.
@@ -13,7 +18,11 @@ enum Config {
     /// Ask-VERA patient Q&A. DRAFT pending clinician sign-off — keep OFF for any
     /// real/patient build. Currently TRUE for developer testing only.
     /// Even when true, VERA must also have ASK_ENABLED set — double gate.
+    #if DEBUG
     static let askVeraEnabled = true
+    #else
+    static let askVeraEnabled = false
+    #endif
 
     /// Base URL of the Kura push-service (device registration + provider trigger).
     /// Deployed on Azure (free tier) — reachable from anywhere, no Mac needed.

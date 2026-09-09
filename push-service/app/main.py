@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+import secrets
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Set
 
 import uuid
@@ -30,11 +32,12 @@ from fastapi import (
     Header,
     HTTPException,
     Response,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse
-from sqlalchemy import delete, select
+from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy import delete, select, update, or_
 from sqlalchemy.orm import Session
 
 from .console import CONSOLE_HTML
@@ -42,6 +45,8 @@ from .console import CONSOLE_HTML
 from . import auth as auth_lib
 from . import notify_email
 from . import settings_store
+from . import participant_auth
+from . import participant_profile
 from .apns import APNsClient
 from .config import Settings, get_settings
 from .db import (
@@ -49,6 +54,8 @@ from .db import (
     Clinician as ClinicianRow,
     ClinicianNote as NoteRow,
     Device as DeviceRow,
+    ParticipantAccess,
+    EnrollmentAudit,
     build_engine,
     make_session_factory,
 )
@@ -62,6 +69,11 @@ from .models import (
     StartCheckinRequest,
     StartCheckinResponse,
     TriageActionRequest,
+    OutcomeEvent,
+    AskRequest,
+    EnrollmentRequest, RedeemRequest,
+    RecordingConsentRequest,
+    PreferencesUpdate, ReadinessUpdate, ContactHandoff,
 )
 from .vera_client import VeraClient
 
@@ -69,7 +81,52 @@ SESSION_COOKIE = "kura_session"
 
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Kura push-service", version="0.1.0")
+def _retry_alert_pass():
+    # Each worker thread owns its own SQLAlchemy session, including shutdown.
+    with _session_factory()() as db:
+        rows = db.execute(select(CheckinRow).where(CheckinRow.alerted_at.is_(None), CheckinRow.has_priority.is_(True))).scalars().all()
+        for row in rows:
+            if row.summary_json:
+                _maybe_send_emergency_alert(row, json.loads(row.summary_json), get_settings(), db)
+
+
+async def retry_alerts():
+    while True:
+        try:
+            await asyncio.to_thread(_retry_alert_pass)
+            with _session_factory()() as db:
+                for row in db.execute(select(CheckinRow).where(CheckinRow.needs_revoke.is_(True))).scalars().all():
+                    try:
+                        summary = await VeraClient(get_settings()).stop_session(row.session_id)
+                        _store_summary(row, summary, db)
+                        row.needs_revoke = False
+                        row.session_token = None
+                        db.commit()
+                    except Exception:
+                        logging.warning("Session revocation pending for %s", row.session_id)
+        except Exception:
+            logging.exception("Alert retry pass failed")
+        await asyncio.sleep(15)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    settings = get_settings()
+    if settings.deployment_mode == "production":
+        if len(settings.session_secret) < 32 or not settings.provider_api_key or not settings.vera_event_key:
+            raise RuntimeError("Production requires strong SESSION_SECRET, PROVIDER_API_KEY and VERA_EVENT_KEY")
+        if not settings.vera_api_base.startswith("https://") or not settings.vera_api_key:
+            raise RuntimeError("Production requires HTTPS VERA_API_BASE and VERA_API_KEY")
+    worker = asyncio.create_task(retry_alerts())
+    try:
+        yield
+    finally:
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
+
+
+app = FastAPI(title="Kura push-service", version="0.2.0", lifespan=lifespan)
 
 # Database engine + session factory (SQLite by default; Postgres via DATABASE_URL).
 # Built lazily on first use so importing the module never touches disk.
@@ -108,6 +165,9 @@ def _checkin_dict(c: CheckinRow) -> dict:
         "has_priority": c.has_priority, "completed_at": c.completed_at,
         "acknowledged_at": c.acknowledged_at, "acknowledged_by": c.acknowledged_by,
         "resolved_at": c.resolved_at, "resolved_by": c.resolved_by,
+        "summary_version": c.summary_version, "alert_state": c.alert_state,
+        "alert_attempts": c.alert_attempts, "alert_next_at": c.alert_next_at,
+        "owner": c.owner,
     }
 
 
@@ -190,9 +250,9 @@ def require_provider(
     if clinician is not None:
         return clinician
     expected = settings.provider_api_key
-    if not expected:
+    if not expected and settings.deployment_mode == "development":
         return None  # auth disabled (dev only)
-    if x_provider_key == expected:
+    if expected and x_provider_key and secrets.compare_digest(x_provider_key, expected):
         return None  # authenticated via legacy shared key, no clinician identity
     raise HTTPException(status_code=401, detail="login required")
 
@@ -331,7 +391,9 @@ def admin_test_email(
 
 
 @app.post("/v1/devices/register")
-def register_device(reg: DeviceRegistration, db: Session = Depends(get_db)) -> dict:
+def register_device(reg: DeviceRegistration, db: Session = Depends(get_db),
+                    authorization: str | None = Header(default=None), settings: Settings = Depends(get_settings)) -> dict:
+    access = participant_auth.require_user(reg.user_id, authorization, db, settings)
     now = datetime.now(timezone.utc)
     row = db.get(DeviceRow, reg.user_id)
     if row is None:
@@ -340,7 +402,7 @@ def register_device(reg: DeviceRegistration, db: Session = Depends(get_db)) -> d
     row.push_token = reg.push_token
     row.platform = reg.platform
     row.token_type = reg.token_type
-    row.role = reg.role
+    row.role = access.role if access else reg.role
     if reg.display_name:
         row.display_name = reg.display_name
     row.app_version = reg.app_version
@@ -360,11 +422,127 @@ def list_devices(
 
 
 @app.get("/v1/devices/{user_id}")
-def get_device(user_id: str, db: Session = Depends(get_db)) -> dict:
+def get_device(user_id: str, db: Session = Depends(get_db), _: None = Depends(require_provider)) -> dict:
     row = db.get(DeviceRow, user_id)
     if row is None:
         raise HTTPException(status_code=404, detail="no device registered for user_id")
     return _device_dict(row)
+
+
+@app.post("/v1/enrollments")
+def create_enrollment(body: EnrollmentRequest, db: Session = Depends(get_db),
+                      clinician: ClinicianRow | None = Depends(require_provider)):
+    if db.get(ParticipantAccess, body.user_id):
+        raise HTTPException(409, "Respondent already enrolled; revoke/reissue credentials explicitly")
+    if body.role == "caregiver" and body.patient_id and not body.caregiver_consent:
+        raise HTTPException(422, "Document authorized caregiver permission before linking a patient")
+    code = secrets.token_urlsafe(24)
+    row = ParticipantAccess(user_id=body.user_id, patient_id=body.patient_id,
+        role=body.role, caregiver_consent=body.caregiver_consent,
+        stroke_type=body.stroke_type, readiness_note=body.readiness_note,
+        code_hash=participant_auth.digest(code), code_expires_at=datetime.now(timezone.utc) + timedelta(hours=48),
+        created_by=_actor_label(clinician))
+    db.add(row)
+    db.commit()
+    return {"user_id": row.user_id, "enrollment_code": code, "expires_in_hours": 48}
+
+
+@app.post("/v1/enrollments/redeem")
+def redeem_enrollment(body: RedeemRequest, db: Session = Depends(get_db)):
+    return participant_auth.redeem(body.code, db)
+
+
+@app.get("/v1/participants/me/preferences")
+def my_preferences(db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+                   authorization: str | None = Header(default=None)):
+    row = participant_auth.credential(authorization, db, settings)
+    if row is None:
+        raise HTTPException(401, "Verified participant credentials required")
+    return participant_profile.preference_response(row)
+
+
+@app.put("/v1/participants/me/preferences")
+def save_my_preferences(body: PreferencesUpdate, db: Session = Depends(get_db),
+                        settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None)):
+    row = participant_auth.credential(authorization, db, settings)
+    if row is None:
+        raise HTTPException(401, "Verified participant credentials required")
+    return participant_profile.update_profile(db, row, body.expected_version,
+        {"preferences_json": body.preferences.model_dump_json()}, "respondent:" + row.user_id, "preferences_changed")
+
+
+@app.get("/v1/enrollments")
+def list_enrollments(db: Session = Depends(get_db), _: None = Depends(require_provider)):
+    return [participant_profile.profile_response(db, row)
+            for row in db.execute(select(ParticipantAccess).order_by(ParticipantAccess.user_id)).scalars()]
+
+
+@app.get("/v1/enrollments/{user_id}/profile")
+def enrollment_profile(user_id: str, db: Session = Depends(get_db), _: None = Depends(require_provider)):
+    row = db.get(ParticipantAccess, user_id)
+    if row is None:
+        raise HTTPException(404, "Unknown enrollment")
+    result = participant_profile.profile_response(db, row)
+    result["linked_respondents"] = [participant_profile.profile_response(db, other) for other in
+        db.execute(select(ParticipantAccess).where(ParticipantAccess.patient_id == row.patient_id,
+                                                  ParticipantAccess.revoked_at.is_(None))).scalars()] if row.patient_id else []
+    result["audit"] = [{"actor": event.actor, "action": event.action, "at": event.created_at,
+                        "detail": json.loads(event.detail_json)} for event in db.execute(
+        select(EnrollmentAudit).where(EnrollmentAudit.user_id == user_id).order_by(EnrollmentAudit.created_at.desc()).limit(50)).scalars()]
+    return result
+
+
+@app.put("/v1/enrollments/{user_id}/readiness")
+def save_readiness(user_id: str, body: ReadinessUpdate, db: Session = Depends(get_db),
+                   clinician: ClinicianRow | None = Depends(require_provider)):
+    row = participant_profile.active_enrollment(db, user_id)
+    if body.readiness in {"ready", "with_support"} and not body.note.strip():
+        raise HTTPException(422, "Document the agreed independent-use or support arrangement")
+    participant_profile.update_profile(db, row, body.expected_version,
+        {"readiness": body.readiness, "reassess_on": body.reassess_on.isoformat() if body.reassess_on else None,
+         "readiness_note": body.note.strip()}, _actor_label(clinician), "readiness_changed")
+    return participant_profile.profile_response(db, row)
+
+
+@app.post("/v1/enrollments/{user_id}/handoff")
+def handoff_contact(user_id: str, body: ContactHandoff, db: Session = Depends(get_db),
+                    clinician: ClinicianRow | None = Depends(require_provider)):
+    row = participant_profile.active_enrollment(db, user_id)
+    return participant_profile.set_contact(db, row, body, _actor_label(clinician))
+
+
+@app.post("/v1/enrollments/{user_id}/revoke")
+def revoke_enrollment(user_id: str, db: Session = Depends(get_db),
+                      clinician: ClinicianRow | None = Depends(require_provider)):
+    access = db.get(ParticipantAccess, user_id)
+    if access is None:
+        raise HTTPException(404, "Unknown enrollment")
+    access.revoked_at = datetime.now(timezone.utc)
+    access.token_hash = None
+    access.code_hash = None
+    rows = db.execute(select(CheckinRow).where(CheckinRow.user_id == user_id)).scalars().all()
+    for row in rows:
+        row.needs_revoke = True
+        row.session_token = None
+        _add_note(db, row.session_id, _actor_label(clinician), "Respondent access revoked; engine session revocation queued")
+    db.commit()
+    return {"revoked": True, "engine_revocations_pending": len(rows)}
+
+
+@app.post("/v1/enrollments/{user_id}/reissue")
+def reissue_enrollment(user_id: str, db: Session = Depends(get_db),
+                      clinician: ClinicianRow | None = Depends(require_provider)):
+    access = db.get(ParticipantAccess, user_id)
+    if access is None:
+        raise HTTPException(404, "Unknown enrollment")
+    revoke_enrollment(user_id, db, clinician)
+    code = secrets.token_urlsafe(24)
+    access.code_hash = participant_auth.digest(code)
+    access.code_expires_at = datetime.now(timezone.utc) + timedelta(hours=48)
+    access.token_hash = None
+    access.revoked_at = None
+    db.commit()
+    return {"user_id": user_id, "enrollment_code": code, "expires_in_hours": 48}
 
 
 @app.delete("/v1/devices/{user_id}")
@@ -391,6 +569,10 @@ async def start_checkin(
     db: Session = Depends(get_db),
     _: None = Depends(require_provider),
 ) -> StartCheckinResponse:
+    if req.use_preferred_contact:
+        source = participant_profile.active_enrollment(db, req.user_id)
+        target = participant_profile.preferred_respondent(db, source)
+        req = req.model_copy(update={"user_id": target.user_id})
     device = db.get(DeviceRow, req.user_id)
     if device is None:
         raise HTTPException(
@@ -401,6 +583,17 @@ async def start_checkin(
     # Role is a property of the participant (declared at registration), not a
     # per-check-in choice. Use the device's role.
     role = device.role or req.role
+    access = db.get(ParticipantAccess, req.user_id)
+    if access and access.revoked_at:
+        raise HTTPException(403, "Respondent access revoked")
+    if settings.deployment_mode == "production" and not access:
+        raise HTTPException(403, "Provider-authored enrollment required")
+    if access:
+        role = access.role
+        if access.readiness == "paused":
+            raise HTTPException(409, "Check-ins are paused for this respondent; reassess readiness first")
+        if settings.deployment_mode == "production" and access.readiness not in {"ready", "with_support"}:
+            raise HTTPException(409, "Review app-use readiness before starting a production check-in")
 
     vera = VeraClient(settings)
     try:
@@ -411,10 +604,20 @@ async def start_checkin(
             honorific=req.honorific,
             role=role,
             empathy=req.empathy,
+            caregiver_consent=access.caregiver_consent if access else req.caregiver_consent,
+            patient_id=access.patient_id if access else req.patient_id,
+            stroke_type=access.stroke_type if access else req.stroke_type,
+            rate=req.rate if req.rate is not None else participant_profile.preferences(access).speech_rate if access else None,
+            communication_preferences=participant_profile.preferences(access).model_dump() if access else None,
         )
     except Exception as exc:  # surface VERA failures clearly to the provider
         raise HTTPException(status_code=502, detail=f"VERA session start failed: {exc}")
 
+    # Persist before external delivery; polling survives process restarts and
+    # the outcome receiver can correlate a session before the phone opens it.
+    db.add(CheckinRow(session_id=session_id, user_id=req.user_id,
+                     scenario=req.scenario, role=role, status="started", session_token=vera.session_token))
+    db.commit()
     apns = APNsClient(settings)
     result = await apns.send_checkin(
         push_token=device.push_token,
@@ -422,19 +625,13 @@ async def start_checkin(
         scenario=req.scenario,
     )
 
-    invite = {"type": "checkin_invite", "session_id": session_id, "scenario": req.scenario}
+    invite = {"type": "checkin_invite", "session_id": session_id, "scenario": req.scenario, "session_token": vera.session_token}
     # Queue for the polling path (free-tier friendly)...
     _pending[req.user_id] = invite
     # ...and also push to any live WebSocket (instant path, when available).
     live_delivered = await notify_manager.deliver(req.user_id, invite)
 
     # Persist the check-in so the console can filter/report later.
-    db.add(CheckinRow(
-        session_id=session_id, user_id=req.user_id,
-        scenario=req.scenario, role=role,
-        started_at=datetime.now(timezone.utc), status="started",
-    ))
-    db.commit()
 
     return StartCheckinResponse(
         session_id=session_id,
@@ -451,6 +648,8 @@ def list_checkins(
     db: Session = Depends(get_db),
     priority_only: bool = False,
     unresolved_priority: bool = False,
+    failed_delivery: bool = False,
+    unassigned: bool = False,
     user_id: str | None = None,
     _: ClinicianRow | None = Depends(require_provider),
 ) -> list[dict]:
@@ -462,6 +661,10 @@ def list_checkins(
         stmt = stmt.where(CheckinRow.has_priority.is_(True))
     if unresolved_priority:
         stmt = stmt.where(CheckinRow.resolved_at.is_(None))
+    if failed_delivery:
+        stmt = stmt.where(CheckinRow.alert_state == "failed")
+    if unassigned:
+        stmt = stmt.where(CheckinRow.has_priority.is_(True), CheckinRow.owner.is_(None), CheckinRow.resolved_at.is_(None))
     if user_id:
         stmt = stmt.where(CheckinRow.user_id == user_id)
     return [_checkin_dict(c) for c in db.execute(stmt).scalars().all()]
@@ -602,6 +805,8 @@ def acknowledge_checkin(
     label = _actor_label(clinician)
     row.acknowledged_at = datetime.now(timezone.utc)
     row.acknowledged_by = label
+    row.owner = body.owner if body and body.owner else label
+    _add_note(db, session_id, label, f"Acknowledged; owner: {row.owner}")
     if body and (body.note or "").strip():
         _add_note(db, session_id, label, body.note)
     db.commit()
@@ -627,6 +832,7 @@ def resolve_checkin(
         row.acknowledged_by = label
     row.resolved_at = now
     row.resolved_by = label
+    _add_note(db, session_id, label, "Resolved / followed up")
     if body and (body.note or "").strip():
         _add_note(db, session_id, label, body.note)
     db.commit()
@@ -673,6 +879,7 @@ def reopen_checkin(
     if row is None:
         raise HTTPException(status_code=404, detail="no check-in for session_id")
     row.acknowledged_at = None
+    _add_note(db, session_id, "workflow", f"Reopened; previous acknowledgement: {row.acknowledged_by}; resolution: {row.resolved_by}")
     row.acknowledged_by = None
     row.resolved_at = None
     row.resolved_by = None
@@ -685,14 +892,16 @@ async def _fetch_and_store_summary(
 ) -> dict | None:
     """Get VERA's clinician summary and persist it on the check-in row."""
     vera = VeraClient(settings)
-    summary = await vera.clinician_summary(session_id)
+    try:
+        summary = await vera.clinician_summary(session_id)
+    except Exception:
+        logging.warning("Could not refresh summary for %s", session_id)
+        return None
     if summary is None:
         return None
     row = db.get(CheckinRow, session_id)
     if row is not None:
-        row.summary_json = json.dumps(summary)
-        row.has_priority = bool(summary.get("has_priority"))
-        db.commit()
+        _store_summary(row, summary, db)
         _maybe_send_emergency_alert(row, summary, settings, db)
     return summary
 
@@ -708,18 +917,90 @@ def _summary_min_tier(summary: dict) -> int:
 
 def _maybe_send_emergency_alert(row: CheckinRow, summary: dict,
                                 settings: Settings, db: Session) -> None:
-    """Email the on-call clinician on a Tier-1 (emergency) flag, exactly once.
+    """Retry email acceptance for a Tier-1 (emergency) concern.
     Tier-2/urgent stay in the console worklist to avoid alert fatigue."""
     if row.alerted_at is not None:
         return
     if _summary_min_tier(summary) != 1:
         return
-    eff = settings_store.effective_settings(db, settings)
-    notify_email.send_alert(eff, row.user_id, row.session_id, tier=1)
-    # Mark as alerted regardless of send success, so a misconfigured SMTP doesn't
-    # retry on every poll; logs capture failures.
-    row.alerted_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    # Atomic lease prevents two workers from sending simultaneously. SMTP is
+    # at-least-once: a crash after acceptance can still lead to a duplicate.
+    claimed = db.execute(update(CheckinRow).where(
+        CheckinRow.session_id == row.session_id, CheckinRow.alerted_at.is_(None),
+        or_(CheckinRow.alert_next_at.is_(None), CheckinRow.alert_next_at <= now),
+    ).execution_options(synchronize_session=False).values(alert_state="sending", alert_next_at=now + timedelta(minutes=2),
+             alert_attempts=CheckinRow.alert_attempts + 1))
     db.commit()
+    if not claimed.rowcount:
+        return
+    db.refresh(row)
+    eff = settings_store.effective_settings(db, settings)
+    try:
+        sent = notify_email.send_alert(eff, row.user_id, row.session_id, tier=1)
+    except Exception:
+        logging.exception("Alert delivery failed")
+        sent = False
+    row.alert_state = "smtp_accepted" if sent else "failed"
+    if sent:
+        row.alerted_at = now
+        row.alert_next_at = None
+    else:
+        row.alert_next_at = now + timedelta(seconds=min(3600, 30 * 2 ** min(row.alert_attempts, 7)))
+    db.commit()
+
+
+def _store_summary(row, summary, db):
+    version = int(summary.get("version", 0))
+    if not version and (row.summary_version or 0) > 0:
+        return  # a legacy/unversioned response cannot overwrite newer evidence
+    if version and version <= (row.summary_version or 0):
+        return
+    previous = json.loads(row.summary_json or "{}")
+    def concerns(value):
+        return {json.dumps({key: flag.get(key) for key in ("rule_id", "tier", "matched")}, sort_keys=True)
+                for flag in value.get("priority_items", []) if isinstance(flag, dict)}
+    new_flags = concerns(summary) - concerns(previous)
+    urgency_rank = {None: 0, "routine": 0, "soon": 1, "unsure": 1, "urgent": 2}
+    new_concern = bool(new_flags or (summary.get("callback_requested") and not previous.get("callback_requested"))
+        or urgency_rank.get(summary.get("user_reported_urgency"), 0) > urgency_rank.get(previous.get("user_reported_urgency"), 0))
+    values = dict(summary_json=json.dumps(summary), has_priority=bool(summary.get("has_priority")), summary_version=version)
+    reopen = new_concern and row.resolved_at is not None
+    if reopen:
+        values.update(resolved_at=None, resolved_by=None, acknowledged_at=None, acknowledged_by=None)
+    if new_flags and _summary_min_tier(summary) == 1 and row.alerted_at is not None:
+        values.update(alerted_at=None, alert_next_at=None, alert_state="pending")
+    state = summary.get("state")
+    if state in {"completed", "declined", "withdrawn", "interrupted", "escalated", "in_progress"}:
+        values["status"] = state
+        if state == "completed":
+            values["completed_at"] = row.completed_at or datetime.now(timezone.utc)
+    stmt = update(CheckinRow).where(CheckinRow.session_id == row.session_id,
+                                   CheckinRow.summary_version == (row.summary_version or 0))
+    changed = db.execute(stmt.execution_options(synchronize_session=False).values(**values))
+    if not changed.rowcount:
+        db.rollback()
+        db.refresh(row)
+        return _store_summary(row, summary, db)
+    if reopen:
+        _add_note(db, row.session_id, "workflow", f"New concern in outcome version {version}; reopened. Previous resolution: {row.resolved_by}; owner retained: {row.owner}")
+    db.commit()
+    db.refresh(row)
+
+
+@app.post("/v1/vera/events")
+async def ingest_outcome(event: OutcomeEvent, x_event_key: str = Header(default=""),
+                         settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    if not settings.vera_event_key or not secrets.compare_digest(x_event_key, settings.vera_event_key):
+        raise HTTPException(401, "Invalid event credentials")
+    row = db.get(CheckinRow, event.session_id)
+    if row is None:
+        raise HTTPException(409, "Session not registered yet; retry delivery")
+    if event.summary.get("session_id") != event.session_id or event.summary.get("version") != event.version:
+        raise HTTPException(422, "Event and summary identity/version must agree")
+    _store_summary(row, event.summary, db)
+    _maybe_send_emergency_alert(row, json.loads(row.summary_json), settings, db)
+    return {"accepted_version": row.summary_version, "alert_state": row.alert_state}
 
 
 @app.get("/v1/checkins/{session_id}/summary")
@@ -732,9 +1013,9 @@ async def checkin_summary(
     """Clinician summary (flags + tiers). Returns the stored copy if we have it,
     else fetches from VERA (and stores it). {"ready": false} until available."""
     row = db.get(CheckinRow, session_id)
+    summary = await _fetch_and_store_summary(session_id, settings, db)
     if row is not None and row.summary_json:
         return {"ready": True, "summary": json.loads(row.summary_json), "stored": True}
-    summary = await _fetch_and_store_summary(session_id, settings, db)
     if summary is None:
         return {"ready": False, "session_id": session_id}
     return {"ready": True, "summary": summary}
@@ -746,11 +1027,15 @@ async def complete_checkin(
     body: CompleteCheckinRequest | None = None,
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
 ) -> dict:
     """Called by the app when the check-in ends. Records the patient's
     self-reported urgency (if any) in VERA, marks the check-in complete, and
     captures VERA's clinician summary (flags) into the database for reporting."""
     row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(404, "Unknown check-in")
+    participant_auth.require_user(row.user_id, authorization, db, settings)
     role = row.role if row is not None else "survivor"
 
     # Self-reported urgency first, so it's reflected in the summary we fetch.
@@ -759,14 +1044,27 @@ async def complete_checkin(
         try:
             await vera.record_urgency(session_id, body.urgency, role=role)
         except Exception as exc:
-            logging.warning("urgency record failed for %s: %s", session_id, exc)
+            raise HTTPException(502, "Urgency was not saved; please retry") from exc
 
-    if row is not None:
-        row.status = "completed"
-        row.completed_at = datetime.now(timezone.utc)
-        db.commit()
     summary = await _fetch_and_store_summary(session_id, settings, db)
-    return {"ok": True, "has_priority": bool(summary.get("has_priority")) if summary else None}
+    if summary is None:
+        raise HTTPException(503, "Outcome not available yet; retry")
+    return {"ok": True, "state": row.status, "saved": True, "version": row.summary_version,
+            "alert_state": row.alert_state, "has_priority": row.has_priority}
+
+
+@app.post("/v1/checkins/{session_id}/decline")
+async def decline_checkin(session_id: str, settings: Settings = Depends(get_settings), db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(404, "Unknown check-in")
+    participant_auth.require_user(row.user_id, authorization, db, settings)
+    try:
+        summary = await VeraClient(settings).stop_session(session_id)
+    except Exception as exc:
+        raise HTTPException(502, "Could not confirm that the check-in was stopped") from exc
+    _store_summary(row, summary, db)
+    return {"ok": True, "state": row.status}
 
 
 @app.get("/v1/resources")
@@ -781,6 +1079,61 @@ async def resources(
     return data or {"resources": {}, "disclaimer": "Resources are currently unavailable."}
 
 
+@app.get("/v1/capabilities")
+async def capabilities(settings: Settings = Depends(get_settings)):
+    try:
+        return await VeraClient(settings).capabilities()
+    except Exception:
+        return {"original_audio": False}
+
+
+@app.post("/v1/checkins/{session_id}/recording-consent")
+async def recording_consent(session_id: str, body: RecordingConsentRequest,
+        db: Session = Depends(get_db), settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None)):
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(404, "Unknown check-in")
+    access = participant_auth.require_user(row.user_id, authorization, db, settings)
+    if access is None:
+        raise HTTPException(403, "Verified enrollment required for original recording")
+    try:
+        return await VeraClient(settings).recording_consent(session_id, body.accepted)
+    except Exception as exc:
+        raise HTTPException(409, "Original audio consent could not be saved") from exc
+
+
+@app.post("/v1/checkins/{session_id}/audio/{clip_id}")
+async def upload_original_audio(session_id: str, clip_id: str, request: Request,
+        db: Session = Depends(get_db), settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None)):
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(404, "Unknown check-in")
+    access = participant_auth.require_user(row.user_id, authorization, db, settings)
+    if access is None or row.needs_revoke:
+        raise HTTPException(403, "Active verified enrollment required for original recording")
+    content = bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content) > 10_000_000:
+            raise HTTPException(413, "Recording too large")
+    status, result = await VeraClient(settings).upload_audio(session_id, clip_id, bytes(content),
+        request.headers.get("x-audio-partial") == "true")
+    return Response(content=json.dumps(result), status_code=status, media_type="application/json")
+
+
+@app.get("/v1/checkins/{session_id}/audio/{clip_id}")
+async def original_audio(session_id: str, clip_id: str, db: Session = Depends(get_db),
+        settings: Settings = Depends(get_settings), clinician: ClinicianRow | None = Depends(require_provider)):
+    if clinician is None and not settings.provider_api_key:
+        raise HTTPException(403, "Authenticated clinician access required for original recording")
+    if db.get(CheckinRow, session_id) is None:
+        raise HTTPException(404, "Unknown check-in")
+    content = await VeraClient(settings).original_audio(session_id, clip_id, _actor_label(clinician))
+    if content is None:
+        raise HTTPException(404, "Original recording unavailable")
+    return Response(content=content, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/v1/resource-regions")
 async def resource_regions(settings: Settings = Depends(get_settings)) -> dict:
     data = await VeraClient(settings).get_resource_regions()
@@ -788,14 +1141,38 @@ async def resource_regions(settings: Settings = Depends(get_settings)) -> dict:
 
 
 @app.post("/v1/ask")
-async def ask(body: dict, settings: Settings = Depends(get_settings)) -> dict:
+async def ask(body: AskRequest, settings: Settings = Depends(get_settings), db: Session = Depends(get_db), authorization: str | None = Header(default=None)) -> dict:
     """Proxy to VERA's retrieval-only Ask-VERA. If VERA has it disabled (or no
     VERA), returns a graceful 'unavailable' message. The app also gates this
     behind Config.askVeraEnabled, so it ships off at multiple points."""
-    question = str(body.get("question", "")).strip()
+    question = body.question.strip()
+    if body.user_id:
+        participant_auth.require_user(body.user_id, authorization, db, settings)
+    elif settings.deployment_mode == "production":
+        raise HTTPException(401, "Participant sign-in required")
     if not question:
         return {"kind": "refusal", "answer": "Please type a question."}
-    data = await VeraClient(settings).ask(question)
+    sid = None
+    if body.share_with_team:
+        if not body.user_id or not db.get(DeviceRow, body.user_id):
+            raise HTTPException(404, "A registered respondent is needed to share a question")
+        sid = "ask-" + (body.request_id or str(uuid.uuid4()))
+        existing = db.get(CheckinRow, sid)
+        if existing is not None and existing.user_id != body.user_id:
+            raise HTTPException(409, "Request already belongs to another respondent")
+        if existing is None:
+            db.add(CheckinRow(session_id=sid, user_id=body.user_id, scenario="ask", status="in_progress"))
+            db.commit()
+    data = await VeraClient(settings).ask(question, session_id=sid,
+        share_with_team=body.share_with_team, callback_requested=body.callback_requested)
+    if data and data.get("saved") and sid:
+        if data.get("summary"):
+            _store_summary(db.get(CheckinRow, sid), data.pop("summary"), db)
+        data["answer"] += " Your question was saved for the care team. Review and response are not yet confirmed."
+        if body.callback_requested:
+            data["answer"] += " Your request for human follow-up was also saved."
+    elif data and body.share_with_team:
+        data["answer"] += " Your question was not saved for the care team. Contact them directly if you need help."
     return data or {
         "kind": "refusal",
         "answer": "This isn't available right now. For any health concern, contact "
@@ -804,11 +1181,67 @@ async def ask(body: dict, settings: Settings = Depends(get_settings)) -> dict:
 
 
 @app.get("/v1/checkins/pending/{user_id}")
-def poll_pending(user_id: str) -> dict:
-    """The app polls this every few seconds. Returns the queued check-in invite
-    (and clears it) or null. Works on hosts without WebSockets (Azure free tier).
+def poll_pending(user_id: str, include_received: bool = False, db: Session = Depends(get_db), authorization: str | None = Header(default=None), settings: Settings = Depends(get_settings)) -> dict:
+    """Durable invitations; explicit opt-in also discovers unfinished check-ins.
+
+    Recovery is bounded by the one-hour VERA session credential, not indefinite.
+    Reading never consumes an invitation.
     """
-    return {"invite": _pending.pop(user_id, None)}
+    participant_auth.require_user(user_id, authorization, db, settings)
+    query = select(CheckinRow).where(CheckinRow.user_id == user_id, CheckinRow.needs_revoke.is_(False),
+        CheckinRow.status.in_(["started", "awaiting_consent", "in_progress", "interrupted"]))
+    if include_received:
+        query = query.where(CheckinRow.started_at > datetime.now(timezone.utc) - timedelta(hours=1))
+    else:
+        query = query.where(CheckinRow.invite_received_at.is_(None))
+    row = db.execute(query.order_by(CheckinRow.started_at)).scalars().first()
+    return {"invite": {"type": "checkin_invite", "session_id": row.session_id, "scenario": row.scenario, "session_token": row.session_token} if row else None}
+
+
+@app.post("/v1/checkins/{session_id}/received")
+def acknowledge_invite(session_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None), settings: Settings = Depends(get_settings)):
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(404, "Unknown check-in")
+    participant_auth.require_user(row.user_id, authorization, db, settings)
+    row.invite_received_at = row.invite_received_at or datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/v1/checkins/{session_id}/answer-receipt")
+async def participant_answer_receipt(session_id: str, request: Request, db: Session = Depends(get_db),
+        authorization: str | None = Header(default=None), settings: Settings = Depends(get_settings)):
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(404, "Unknown check-in")
+    participant_auth.require_user(row.user_id, authorization, db, settings)
+    if row.needs_revoke:
+        raise HTTPException(403, "Session access revoked")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 100_000:
+            raise HTTPException(413, "Answer recovery payload too large")
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("Expected answer object")
+        result = await VeraClient(settings).answer_receipt(session_id, payload)
+    except Exception:
+        raise HTTPException(503, "Could not verify this answer; local copy must be retained")
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/v1/checkins/{session_id}/connection")
+def session_connection(session_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None), settings: Settings = Depends(get_settings)):
+    row = db.get(CheckinRow, session_id)
+    if row is None:
+        raise HTTPException(404, "Unknown check-in")
+    participant_auth.require_user(row.user_id, authorization, db, settings)
+    if row.needs_revoke:
+        raise HTTPException(403, "Session access revoked")
+    return {"session_token": row.session_token}
 
 
 @app.websocket("/v1/notify/{user_id}")
@@ -817,6 +1250,12 @@ async def notify_ws(websocket: WebSocket, user_id: str) -> None:
     (free-team alternative to APNs). Sends a 'connected' ack, then streams
     invite payloads delivered via NotifyManager.
     """
+    with _session_factory()() as db:
+        try:
+            participant_auth.require_user(user_id, websocket.headers.get("authorization"), db, get_settings())
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
     await websocket.accept()
     await notify_manager.connect(user_id, websocket)
     await websocket.send_json({"type": "connected", "user_id": user_id})

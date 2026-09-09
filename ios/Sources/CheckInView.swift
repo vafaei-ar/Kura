@@ -12,6 +12,13 @@ struct CheckInView: View {
     @State private var typed = ""
     @State private var chosenUrgency: String?
     @State private var savedHistory = false
+    @State private var saveError: String?
+    @State private var saving = false
+    @State private var receiptText: String?
+    @State private var recordOriginalAudio = false
+    @State private var confirmDiscard = false
+    @State private var textOnly = CommunicationProfile.load().preferences.text_only
+    @State private var speechRate = CommunicationProfile.load().preferences.speech_rate
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -20,20 +27,48 @@ struct CheckInView: View {
                 liveSession
             } else {
                 ConsentView(
-                    onStart: { Haptics.tap(); consented = true; audio.connect(sessionId: invite.sessionId) },
-                    onDecline: { state.endSession() }
+                    recordOriginalAudio: $recordOriginalAudio,
+                    textOnly: $textOnly, speechRate: $speechRate,
+                    onStart: {
+                        Task {
+                            do {
+                                let token = try await CheckinService.sessionToken(sessionId: invite.sessionId)
+                                if recordOriginalAudio && !textOnly {
+                                    try await CheckinService.recordingConsent(sessionId: invite.sessionId, accepted: true)
+                                }
+                                Haptics.tap(); consented = true
+                                audio.textOnly = textOnly; audio.speechRate = Float(speechRate)
+                                audio.recordOriginalAudio = recordOriginalAudio && !textOnly
+                                audio.connect(sessionId: invite.sessionId, token: token)
+                            } catch { saveError = "Session access could not be confirmed. Please check your connection or contact the study team." }
+                        }
+                    },
+                    onDecline: {
+                        Task {
+                            do { try await CheckinService.decline(sessionId: invite.sessionId); state.endSession() }
+                            catch { saveError = "Could not confirm that the invitation was declined. Please retry." }
+                        }
+                    }
                 )
             }
         }
         .onChange(of: audio.state) { newState in
             if newState == .ended {
-                Haptics.success()
+                if audio.terminalState == "completed" { Haptics.success() }
                 saveHistory()
-                // Capture completion immediately (urgency is added on "Done").
-                Task { await CheckinService.complete(sessionId: invite.sessionId) }
             }
+            if newState == .reviewing { typed = audio.partialUserText }
         }
         .onDisappear { audio.disconnect() }
+        .alert("Check-in status", isPresented: Binding(get: { saveError != nil && !consented }, set: { if !$0 { saveError = nil } })) {
+            Button("OK", role: .cancel) { saveError = nil }
+        } message: { Text(saveError ?? "") }
+        .alert("Discard local recovery copy?", isPresented: $confirmDiscard) {
+            Button("Keep it", role: .cancel) { }
+            Button("Discard local copy", role: .destructive) { audio.discardPendingAnswer() }
+        } message: {
+            Text("The answer may already be saved on the server. This only removes the recovery copy from this phone, does not withdraw consent or delete server records, and ends this connection.")
+        }
     }
 
     // MARK: - Live session
@@ -44,6 +79,12 @@ struct CheckInView: View {
         VStack(spacing: 16) {
             if let emergency = audio.emergencyText {
                 emergencyBanner(emergency)
+            }
+            if let warning = audio.recordingWarning { Text(warning).font(.callout).foregroundStyle(.orange) }
+            if let notice = audio.recoveryNotice { Text(notice).font(.callout) }
+            if audio.hasPendingAnswer {
+                if let text = audio.pendingAnswerText { Text("Unconfirmed answer: \(text)").font(.callout) }
+                Button("Discard unconfirmed answer…", role: .destructive) { confirmDiscard = true }
             }
 
             if audio.progress > 0 {
@@ -81,6 +122,38 @@ struct CheckInView: View {
             if audio.state == .ended {
                 urgencyPrompt
             } else {
+                if case .error = audio.state {
+                    Button("Reconnect to saved check-in") {
+                        Task {
+                            do {
+                                let token = try await CheckinService.sessionToken(sessionId: invite.sessionId)
+                                audio.connect(sessionId: invite.sessionId, token: token)
+                            } catch { saveError = "Could not reconnect. Contact the care team if you need help or a new invitation." }
+                        }
+                    }.buttonStyle(.borderedProminent)
+                }
+                if audio.state == .reviewing {
+                    Text("Check the words below. Edit them if needed, then send.").font(.headline)
+                }
+                HStack {
+                    Button("Replay") { audio.replayQuestion() }
+                    Button("Skip") { audio.sendTyped("skip") }
+                    Button(audio.state == .paused ? "Resume" : "Pause") { audio.togglePause() }
+                    if isListening && !audio.textOnly {
+                        Button("I'm finished") { audio.finishSpeaking() }
+                    }
+                }.buttonStyle(.bordered).font(.headline).disabled(audio.hasPendingAnswer)
+                HStack {
+                    Button("Yes") { audio.sendTyped("yes") }
+                    Button("No") { audio.sendTyped("no") }
+                    Button("Unsure") { audio.sendTyped("unsure") }
+                    Button("Human help") { audio.sendTyped("call me") }
+                }.buttonStyle(.bordered).disabled(!audio.canSendAnswer)
+                Menu("Correct stroke type") {
+                    Button("Ischemic") { audio.sendTyped("my stroke was ischemic") }
+                    Button("Hemorrhagic") { audio.sendTyped("my stroke was hemorrhagic") }
+                    Button("Not sure") { audio.sendTyped("i don't know my stroke type") }
+                }.font(.callout).disabled(!audio.canSendAnswer)
                 // Type-to-answer (accessibility: for speech difficulty / aphasia).
                 HStack(spacing: 8) {
                     TextField("Or type your answer", text: $typed)
@@ -93,7 +166,8 @@ struct CheckInView: View {
                         Image(systemName: "paperplane.fill").font(.title3)
                     }
                     .buttonStyle(.borderedProminent).tint(.teal)
-                    .disabled(typed.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .accessibilityLabel("Send answer")
+                    .disabled(!audio.canSendAnswer || typed.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
 
                 Button(role: .destructive) {
@@ -179,6 +253,7 @@ struct CheckInView: View {
     }
 
     private func sendTyped() {
+        guard audio.canSendAnswer else { return }
         audio.sendTyped(typed)
         typed = ""
         inputFocused = false   // dismiss the keyboard after sending
@@ -188,21 +263,32 @@ struct CheckInView: View {
 
     private var urgencyPrompt: some View {
         VStack(spacing: 12) {
-            Text("How urgent did this feel?")
+            Text(audio.terminalState == "completed" ? "How urgent did this feel?" : "This check-in ended")
                 .font(.headline)
-            Text("Optional — your care team reviews every check-in.")
+            Text("Your urgency is separate from automatic safety alerts. This service is not watched in real time.")
                 .font(.footnote).foregroundStyle(.secondary)
-            HStack(spacing: 8) {
+            if audio.terminalState == "completed" {
+              HStack(spacing: 8) {
                 urgencyChip("Routine", "routine")
                 urgencyChip("Soon", "soon")
                 urgencyChip("Urgent", "urgent")
+              }
+              urgencyChip("Not sure", "unsure")
+              Text("Routine: no particular concern. Soon: you want review. Urgent: you feel you need prompt help. Not sure: ask the team to review your uncertainty. For an emergency, call 911 now.")
+                .font(.footnote).foregroundStyle(.secondary)
             }
+            if let saveError { Text(saveError).foregroundStyle(.red) }
+            if let receiptText { Text(receiptText).font(.callout) }
             Button(action: finish) {
-                Text("Done")
+                Text(saving ? "Checking saved status…" : (saveError == nil ? "Done" : "Retry saved status"))
                     .font(.title3.weight(.semibold))
                     .frame(maxWidth: .infinity).padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent).tint(.teal)
+            .disabled(saving)
+            if saveError != nil {
+                Button("Close — status unconfirmed") { state.endSession() }
+            }
         }
     }
 
@@ -216,18 +302,29 @@ struct CheckInView: View {
 
     private func finish() {
         let urgency = chosenUrgency
-        Task { await CheckinService.complete(sessionId: invite.sessionId, urgency: urgency) }
-        state.endSession()
+        saving = true
+        Task {
+            do {
+                let receipt = try await CheckinService.complete(sessionId: invite.sessionId, urgency: urgency)
+                guard receipt.ok && receipt.saved else { throw URLError(.badServerResponse) }
+                receiptText = "Saved. Care-team review and response are not confirmed."
+                saving = false
+                state.endSession()
+            } catch {
+                saving = false
+                saveError = "We couldn't confirm the saved status. Please retry. Do not wait for this app if you need help."
+            }
+        }
     }
 
     private func saveHistory() {
-        guard !savedHistory, !audio.transcript.isEmpty else { return }
+        guard audio.terminalState != "declined", !savedHistory, !audio.transcript.isEmpty else { return }
         savedHistory = true
         let lines = audio.transcript.map {
             HistoryItem.Line(speaker: $0.speaker == .user ? "you" : "bot", text: $0.text)
         }
         HistoryStore.add(HistoryItem(
-            id: invite.sessionId, date: Date(), scenario: invite.scenario, lines: lines
+            id: invite.sessionId, date: Date(), scenario: invite.scenario, lines: lines, state: audio.terminalState
         ))
     }
 
@@ -245,8 +342,10 @@ struct CheckInView: View {
         switch audio.state {
         case .idle, .connecting: return "Connecting…"
         case .speaking:          return "Please listen…"
-        case .listening:         return "Your turn — please speak"
-        case .ended:             return "Check-in complete. Thank you."
+        case .listening:         return audio.textOnly ? "Your turn — type or tap an answer" : audio.manualFinish ? "Your turn — speak, then tap I'm finished" : "Your turn — speak; pause when finished"
+        case .ended:             return audio.terminalState == "completed" ? "Check-in completed." : "Check-in stopped — not completed."
+        case .reviewing:         return "Review your answer"
+        case .paused:            return "Paused — take your time"
         case .error(let m):      return "Something went wrong.\n\(m)"
         }
     }
@@ -255,10 +354,15 @@ struct CheckInView: View {
 // MARK: - Consent
 
 private struct ConsentView: View {
+    @Binding var recordOriginalAudio: Bool
+    @Binding var textOnly: Bool
+    @Binding var speechRate: Double
     let onStart: () -> Void
     let onDecline: () -> Void
+    @State private var recordingCapabilities: CheckinService.Capabilities?
 
     var body: some View {
+        ScrollView {
         VStack(spacing: 22) {
             Spacer()
             Image(systemName: "heart.text.square.fill")
@@ -279,6 +383,17 @@ private struct ConsentView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             Spacer()
+            Toggle("Use text only — no microphone needed", isOn: $textOnly)
+            Text("Voice speed").font(.headline)
+            Slider(value: $speechRate, in: 0.6...1.2, step: 0.05)
+                .accessibilityLabel("Voice speed")
+            if recordingCapabilities?.original_audio == true && !textOnly {
+                Toggle("Save my original voice for clinician review (optional)", isOn: $recordOriginalAudio)
+                Text("Only after you agree to the check-in. Audio expires after \(recordingCapabilities?.audio_retention_days ?? 7) days; clips longer than the supported limit are marked partial.")
+                    .font(.footnote)
+            }
+            Text("You can pause, replay, and edit recognized words before sending. Original audio is off unless you separately choose it.")
+                .font(.footnote).foregroundStyle(.secondary)
             Button(action: onStart) { Text("Start check-in") }
                 .buttonStyle(PrimaryButtonStyle())
 
@@ -288,6 +403,8 @@ private struct ConsentView: View {
             .buttonStyle(.bordered).tint(.secondary)
         }
         .padding(24)
+        }
         .screenBackground()
+        .task { recordingCapabilities = await CheckinService.capabilities() }
     }
 }
