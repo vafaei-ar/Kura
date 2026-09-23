@@ -70,3 +70,8 @@ pytest
 Inherits VERA-cloud's scope: a **bounded, non-diagnostic, human-supervised**
 check-in tool. Kura only *transports* and *triggers*; it never diagnoses,
 advises, or changes the clinical flow. No real patient data lives in this repo.
+
+
+## License
+
+This repository is currently **source-available for research transparency**. No open-source license has been assigned to Kura. Publication of the source code does not by itself grant reuse or redistribution rights. The clinical/dialog engine remains in the companion VERA-cloud repository, which carries its own license.
